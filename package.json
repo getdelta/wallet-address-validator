@@ -1,5 +1,5 @@
 {
-  "name": "wallet-address-validator",
+  "name": "@getdelta/wallet-address-validator",
   "description": "Wallet address validator for Bitcoin and other Altcoins.",
   "keywords": [
     "btc",
@@ -33,11 +33,11 @@
   ],
   "version": "0.3.1",
   "author": "Tomek Kolasa <tomek@kolasa.me>",
-  "homepage": "https://github.com/ognus/wallet-address-validator",
+  "homepage": "https://github.com/getdelta/wallet-address-validator",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/ognus/wallet-address-validator.git"
+    "url": "https://github.com/getdelta/wallet-address-validator.git"
   },
   "main": "src/wallet_address_validator",
   "engines": {

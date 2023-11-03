@@ -1,4 +1,4 @@
-# trezor-address-validator
+# @getdelta/wallet-address-validator
 Simple wallet address validator for validating Bitcoin and other altcoins addresses in **Node.js and browser**.
 
 Forked from [ryanralph/altcoin-address](https://github.com/ryanralph/altcoin-address).
@@ -9,7 +9,7 @@ Forked from [ryanralph/altcoin-address](https://github.com/ryanralph/altcoin-add
 
 ### NPM
 ```
-npm install trezor-address-validator
+npm install @getdelta/wallet-address-validator
 ```
 
 ### Browser

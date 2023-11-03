@@ -24,6 +24,7 @@ var STEEMValidator = require("./steem_validator");
 var SYSValidator = require("./sys_validator");
 var ZILValidator = require("./zil_validator");
 var NXTValidator = require("./nxt_validator");
+var N3Validator = require("./n3_validator");
 
 // defines P2PKH, P2SH and bech32 address types for standard (prod) and testnet networks
 var CURRENCIES = [
@@ -287,6 +288,11 @@ var CURRENCIES = [
         symbol: "gas",
         addressTypes: { prod: ["17"], testnet: [] },
         validator: BTCValidator,
+    },
+    {
+        name: "Neo N3",
+        symbol: "n3",
+        validator: N3Validator,
     },
     {
         name: "Qtum",

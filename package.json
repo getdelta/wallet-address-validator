@@ -35,7 +35,7 @@
     "browser",
     "nodejs"
   ],
-  "version": "0.3.26",
+  "version": "0.3.27",
   "author": "Tomek Kolasa <tomek@kolasa.me>",
   "homepage": "https://github.com/getdelta/wallet-address-validator",
   "license": "MIT",

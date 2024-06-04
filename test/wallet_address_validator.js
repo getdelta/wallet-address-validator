@@ -459,7 +459,7 @@ describe('WAValidator.validate()', function () {
             valid('ak_8QxnP9qXP3NpA4fskYZE7P1GfHzKZAMmoNuok7jJC5NqVYi21', 'ae')
         });
 
-		it('should return true for correct Ardor addresses', () => {
+        it('should return true for correct Ardor addresses', () => {
             valid('ARDOR-HFNE-E2VE-SMV3-DCRZ8', 'ardr')
         });
 
@@ -1071,9 +1071,19 @@ describe('WAValidator.validate()', function () {
             valid('grs1qnxt8adg4qk3ljl0qhvp4m0nt56w6ma77vwr2jq', 'grs');
             valid('tgrs1qw4z3xrtgx4f6w7akwpp2xa0gupmkv4yauemmm9', 'grs', 'testnet');
 
-            invalid("grs1q49qls5kklryt95g5xq4p6msycpgjp8ramfc9jq", 'grs'),
-            invalid("tgrs1qqjd3qhncsxdyh5gt7hz4k6zzvfguslwxwgv23j", 'grs')
+            invalid("grs1q49qls5kklryt95g5xq4p6msycpgjp8ramfc9jq", 'grs');
+            invalid("tgrs1qqjd3qhncsxdyh5gt7hz4k6zzvfguslwxwgv23j", 'grs');
 
+        });
+
+        it('should return true for correct sol addresses', function () {
+            valid('4KtEQ1xZ3aMvp3AM8zcaVYYn39eCPMWnsMDngLTTngB3', 'sol');
+            valid('DCAKuApAuZtVNYLk3KTAVW9GLWVvPbnb5CxxRRmVgcTr', 'SOL');
+        });
+
+        it('should return false for incorrect sol addresses', function () {
+            invalid('4KtEQ1xZ3aMvp3AM8zcaVYYn39eCPMWnsMDngLTTngB3T2', 'sol');
+            invalid('DCAKuApAuZtVNYLk3KTAVWLWVvnb5CxxRRmVgcTr', 'SOL');
         });
     });
 });

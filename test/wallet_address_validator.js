@@ -51,6 +51,7 @@ describe('WAValidator.validate()', function () {
             valid('BC1SW50QA3JX3S', 'bitcoin');
             valid('bc1zw508d6qejxtdg4y5r3zarvaryvg6kdaj', 'bitcoin');
             valid('tb1qqqqqp399et2xygdj5xreqhjjvcmzhxw4aywxecjdzew6hylgvsesrxh6hy', 'bitcoin', 'testnet');
+            valid('bc1p8x4s95flx96mc6nprau4hh85gtqtmc7ng9getq2a8cway3gyhudsuce0xn', 'bitcoin');
 
             invalid("tc1qw508d6qejxtdg4y5r3zarvary0c5xw7kg3g4ty", 'bitcoin');
             invalid("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t5", 'bitcoin');

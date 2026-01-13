@@ -1,47 +1,537 @@
 (function(f){if(typeof exports==="object"&&typeof module!=="undefined"){module.exports=f()}else if(typeof define==="function"&&define.amd){define([],f)}else{var g;if(typeof window!=="undefined"){g=window}else if(typeof global!=="undefined"){g=global}else if(typeof self!=="undefined"){g=self}else{g=this}g.WAValidator = f()}})(function(){var define,module,exports;return (function(){function r(e,n,t){function o(i,f){if(!n[i]){if(!e[i]){var c="function"==typeof require&&require;if(!f&&c)return c(i,!0);if(u)return u(i,!0);var a=new Error("Cannot find module '"+i+"'");throw a.code="MODULE_NOT_FOUND",a}var p=n[i]={exports:{}};e[i][0].call(p.exports,function(r){var n=e[i][1][r];return o(n||r)},p,p.exports,r,e,n,t)}return n[i].exports}for(var u="function"==typeof require&&require,i=0;i<t.length;i++)o(t[i]);return o}return r})()({1:[function(require,module,exports){
+"use strict";
+/*! scure-base - MIT License (c) 2022 Paul Miller (paulmillr.com) */
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.bytes = exports.stringToBytes = exports.str = exports.bytesToString = exports.hex = exports.utf8 = exports.bech32m = exports.bech32 = exports.base58check = exports.createBase58check = exports.base58xmr = exports.base58xrp = exports.base58flickr = exports.base58 = exports.base64urlnopad = exports.base64url = exports.base64nopad = exports.base64 = exports.base32crockford = exports.base32hexnopad = exports.base32hex = exports.base32nopad = exports.base32 = exports.base16 = exports.utils = exports.assertNumber = void 0;
+// Utilities
+/**
+ * @__NO_SIDE_EFFECTS__
+ */
+function assertNumber(n) {
+    if (!Number.isSafeInteger(n))
+        throw new Error(`Wrong integer: ${n}`);
+}
+exports.assertNumber = assertNumber;
+function isBytes(a) {
+    return (a instanceof Uint8Array ||
+        (a != null && typeof a === 'object' && a.constructor.name === 'Uint8Array'));
+}
+/**
+ * @__NO_SIDE_EFFECTS__
+ */
+function chain(...args) {
+    const id = (a) => a;
+    // Wrap call in closure so JIT can inline calls
+    const wrap = (a, b) => (c) => a(b(c));
+    // Construct chain of args[-1].encode(args[-2].encode([...]))
+    const encode = args.map((x) => x.encode).reduceRight(wrap, id);
+    // Construct chain of args[0].decode(args[1].decode(...))
+    const decode = args.map((x) => x.decode).reduce(wrap, id);
+    return { encode, decode };
+}
+/**
+ * Encodes integer radix representation to array of strings using alphabet and back
+ * @__NO_SIDE_EFFECTS__
+ */
+function alphabet(alphabet) {
+    return {
+        encode: (digits) => {
+            if (!Array.isArray(digits) || (digits.length && typeof digits[0] !== 'number'))
+                throw new Error('alphabet.encode input should be an array of numbers');
+            return digits.map((i) => {
+                assertNumber(i);
+                if (i < 0 || i >= alphabet.length)
+                    throw new Error(`Digit index outside alphabet: ${i} (alphabet: ${alphabet.length})`);
+                return alphabet[i];
+            });
+        },
+        decode: (input) => {
+            if (!Array.isArray(input) || (input.length && typeof input[0] !== 'string'))
+                throw new Error('alphabet.decode input should be array of strings');
+            return input.map((letter) => {
+                if (typeof letter !== 'string')
+                    throw new Error(`alphabet.decode: not string element=${letter}`);
+                const index = alphabet.indexOf(letter);
+                if (index === -1)
+                    throw new Error(`Unknown letter: "${letter}". Allowed: ${alphabet}`);
+                return index;
+            });
+        },
+    };
+}
+/**
+ * @__NO_SIDE_EFFECTS__
+ */
+function join(separator = '') {
+    if (typeof separator !== 'string')
+        throw new Error('join separator should be string');
+    return {
+        encode: (from) => {
+            if (!Array.isArray(from) || (from.length && typeof from[0] !== 'string'))
+                throw new Error('join.encode input should be array of strings');
+            for (let i of from)
+                if (typeof i !== 'string')
+                    throw new Error(`join.encode: non-string input=${i}`);
+            return from.join(separator);
+        },
+        decode: (to) => {
+            if (typeof to !== 'string')
+                throw new Error('join.decode input should be string');
+            return to.split(separator);
+        },
+    };
+}
+/**
+ * Pad strings array so it has integer number of bits
+ * @__NO_SIDE_EFFECTS__
+ */
+function padding(bits, chr = '=') {
+    assertNumber(bits);
+    if (typeof chr !== 'string')
+        throw new Error('padding chr should be string');
+    return {
+        encode(data) {
+            if (!Array.isArray(data) || (data.length && typeof data[0] !== 'string'))
+                throw new Error('padding.encode input should be array of strings');
+            for (let i of data)
+                if (typeof i !== 'string')
+                    throw new Error(`padding.encode: non-string input=${i}`);
+            while ((data.length * bits) % 8)
+                data.push(chr);
+            return data;
+        },
+        decode(input) {
+            if (!Array.isArray(input) || (input.length && typeof input[0] !== 'string'))
+                throw new Error('padding.encode input should be array of strings');
+            for (let i of input)
+                if (typeof i !== 'string')
+                    throw new Error(`padding.decode: non-string input=${i}`);
+            let end = input.length;
+            if ((end * bits) % 8)
+                throw new Error('Invalid padding: string should have whole number of bytes');
+            for (; end > 0 && input[end - 1] === chr; end--) {
+                if (!(((end - 1) * bits) % 8))
+                    throw new Error('Invalid padding: string has too much padding');
+            }
+            return input.slice(0, end);
+        },
+    };
+}
+/**
+ * @__NO_SIDE_EFFECTS__
+ */
+function normalize(fn) {
+    if (typeof fn !== 'function')
+        throw new Error('normalize fn should be function');
+    return { encode: (from) => from, decode: (to) => fn(to) };
+}
+/**
+ * Slow: O(n^2) time complexity
+ * @__NO_SIDE_EFFECTS__
+ */
+function convertRadix(data, from, to) {
+    // base 1 is impossible
+    if (from < 2)
+        throw new Error(`convertRadix: wrong from=${from}, base cannot be less than 2`);
+    if (to < 2)
+        throw new Error(`convertRadix: wrong to=${to}, base cannot be less than 2`);
+    if (!Array.isArray(data))
+        throw new Error('convertRadix: data should be array');
+    if (!data.length)
+        return [];
+    let pos = 0;
+    const res = [];
+    const digits = Array.from(data);
+    digits.forEach((d) => {
+        assertNumber(d);
+        if (d < 0 || d >= from)
+            throw new Error(`Wrong integer: ${d}`);
+    });
+    while (true) {
+        let carry = 0;
+        let done = true;
+        for (let i = pos; i < digits.length; i++) {
+            const digit = digits[i];
+            const digitBase = from * carry + digit;
+            if (!Number.isSafeInteger(digitBase) ||
+                (from * carry) / from !== carry ||
+                digitBase - digit !== from * carry) {
+                throw new Error('convertRadix: carry overflow');
+            }
+            carry = digitBase % to;
+            const rounded = Math.floor(digitBase / to);
+            digits[i] = rounded;
+            if (!Number.isSafeInteger(rounded) || rounded * to + carry !== digitBase)
+                throw new Error('convertRadix: carry overflow');
+            if (!done)
+                continue;
+            else if (!rounded)
+                pos = i;
+            else
+                done = false;
+        }
+        res.push(carry);
+        if (done)
+            break;
+    }
+    for (let i = 0; i < data.length - 1 && data[i] === 0; i++)
+        res.push(0);
+    return res.reverse();
+}
+const gcd = /* @__NO_SIDE_EFFECTS__ */ (a, b) => (!b ? a : gcd(b, a % b));
+const radix2carry = /*@__NO_SIDE_EFFECTS__ */ (from, to) => from + (to - gcd(from, to));
+/**
+ * Implemented with numbers, because BigInt is 5x slower
+ * @__NO_SIDE_EFFECTS__
+ */
+function convertRadix2(data, from, to, padding) {
+    if (!Array.isArray(data))
+        throw new Error('convertRadix2: data should be array');
+    if (from <= 0 || from > 32)
+        throw new Error(`convertRadix2: wrong from=${from}`);
+    if (to <= 0 || to > 32)
+        throw new Error(`convertRadix2: wrong to=${to}`);
+    if (radix2carry(from, to) > 32) {
+        throw new Error(`convertRadix2: carry overflow from=${from} to=${to} carryBits=${radix2carry(from, to)}`);
+    }
+    let carry = 0;
+    let pos = 0; // bitwise position in current element
+    const mask = 2 ** to - 1;
+    const res = [];
+    for (const n of data) {
+        assertNumber(n);
+        if (n >= 2 ** from)
+            throw new Error(`convertRadix2: invalid data word=${n} from=${from}`);
+        carry = (carry << from) | n;
+        if (pos + from > 32)
+            throw new Error(`convertRadix2: carry overflow pos=${pos} from=${from}`);
+        pos += from;
+        for (; pos >= to; pos -= to)
+            res.push(((carry >> (pos - to)) & mask) >>> 0);
+        carry &= 2 ** pos - 1; // clean carry, otherwise it will cause overflow
+    }
+    carry = (carry << (to - pos)) & mask;
+    if (!padding && pos >= from)
+        throw new Error('Excess padding');
+    if (!padding && carry)
+        throw new Error(`Non-zero padding: ${carry}`);
+    if (padding && pos > 0)
+        res.push(carry >>> 0);
+    return res;
+}
+/**
+ * @__NO_SIDE_EFFECTS__
+ */
+function radix(num) {
+    assertNumber(num);
+    return {
+        encode: (bytes) => {
+            if (!isBytes(bytes))
+                throw new Error('radix.encode input should be Uint8Array');
+            return convertRadix(Array.from(bytes), 2 ** 8, num);
+        },
+        decode: (digits) => {
+            if (!Array.isArray(digits) || (digits.length && typeof digits[0] !== 'number'))
+                throw new Error('radix.decode input should be array of numbers');
+            return Uint8Array.from(convertRadix(digits, num, 2 ** 8));
+        },
+    };
+}
+/**
+ * If both bases are power of same number (like `2**8 <-> 2**64`),
+ * there is a linear algorithm. For now we have implementation for power-of-two bases only.
+ * @__NO_SIDE_EFFECTS__
+ */
+function radix2(bits, revPadding = false) {
+    assertNumber(bits);
+    if (bits <= 0 || bits > 32)
+        throw new Error('radix2: bits should be in (0..32]');
+    if (radix2carry(8, bits) > 32 || radix2carry(bits, 8) > 32)
+        throw new Error('radix2: carry overflow');
+    return {
+        encode: (bytes) => {
+            if (!isBytes(bytes))
+                throw new Error('radix2.encode input should be Uint8Array');
+            return convertRadix2(Array.from(bytes), 8, bits, !revPadding);
+        },
+        decode: (digits) => {
+            if (!Array.isArray(digits) || (digits.length && typeof digits[0] !== 'number'))
+                throw new Error('radix2.decode input should be array of numbers');
+            return Uint8Array.from(convertRadix2(digits, bits, 8, revPadding));
+        },
+    };
+}
+/**
+ * @__NO_SIDE_EFFECTS__
+ */
+function unsafeWrapper(fn) {
+    if (typeof fn !== 'function')
+        throw new Error('unsafeWrapper fn should be function');
+    return function (...args) {
+        try {
+            return fn.apply(null, args);
+        }
+        catch (e) { }
+    };
+}
+/**
+ * @__NO_SIDE_EFFECTS__
+ */
+function checksum(len, fn) {
+    assertNumber(len);
+    if (typeof fn !== 'function')
+        throw new Error('checksum fn should be function');
+    return {
+        encode(data) {
+            if (!isBytes(data))
+                throw new Error('checksum.encode: input should be Uint8Array');
+            const checksum = fn(data).slice(0, len);
+            const res = new Uint8Array(data.length + len);
+            res.set(data);
+            res.set(checksum, data.length);
+            return res;
+        },
+        decode(data) {
+            if (!isBytes(data))
+                throw new Error('checksum.decode: input should be Uint8Array');
+            const payload = data.slice(0, -len);
+            const newChecksum = fn(payload).slice(0, len);
+            const oldChecksum = data.slice(-len);
+            for (let i = 0; i < len; i++)
+                if (newChecksum[i] !== oldChecksum[i])
+                    throw new Error('Invalid checksum');
+            return payload;
+        },
+    };
+}
+// prettier-ignore
+exports.utils = {
+    alphabet, chain, checksum, convertRadix, convertRadix2, radix, radix2, join, padding,
+};
+// RFC 4648 aka RFC 3548
+// ---------------------
+exports.base16 = chain(radix2(4), alphabet('0123456789ABCDEF'), join(''));
+exports.base32 = chain(radix2(5), alphabet('ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'), padding(5), join(''));
+exports.base32nopad = chain(radix2(5), alphabet('ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'), join(''));
+exports.base32hex = chain(radix2(5), alphabet('0123456789ABCDEFGHIJKLMNOPQRSTUV'), padding(5), join(''));
+exports.base32hexnopad = chain(radix2(5), alphabet('0123456789ABCDEFGHIJKLMNOPQRSTUV'), join(''));
+exports.base32crockford = chain(radix2(5), alphabet('0123456789ABCDEFGHJKMNPQRSTVWXYZ'), join(''), normalize((s) => s.toUpperCase().replace(/O/g, '0').replace(/[IL]/g, '1')));
+exports.base64 = chain(radix2(6), alphabet('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'), padding(6), join(''));
+exports.base64nopad = chain(radix2(6), alphabet('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'), join(''));
+exports.base64url = chain(radix2(6), alphabet('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'), padding(6), join(''));
+exports.base64urlnopad = chain(radix2(6), alphabet('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'), join(''));
+// base58 code
+// -----------
+const genBase58 = (abc) => chain(radix(58), alphabet(abc), join(''));
+exports.base58 = genBase58('123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz');
+exports.base58flickr = genBase58('123456789abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ');
+exports.base58xrp = genBase58('rpshnaf39wBUDNEGHJKLM4PQRST7VWXYZ2bcdeCg65jkm8oFqi1tuvAxyz');
+// xmr ver is done in 8-byte blocks (which equals 11 chars in decoding). Last (non-full) block padded with '1' to size in XMR_BLOCK_LEN.
+// Block encoding significantly reduces quadratic complexity of base58.
+// Data len (index) -> encoded block len
+const XMR_BLOCK_LEN = [0, 2, 3, 5, 6, 7, 9, 10, 11];
+exports.base58xmr = {
+    encode(data) {
+        let res = '';
+        for (let i = 0; i < data.length; i += 8) {
+            const block = data.subarray(i, i + 8);
+            res += exports.base58.encode(block).padStart(XMR_BLOCK_LEN[block.length], '1');
+        }
+        return res;
+    },
+    decode(str) {
+        let res = [];
+        for (let i = 0; i < str.length; i += 11) {
+            const slice = str.slice(i, i + 11);
+            const blockLen = XMR_BLOCK_LEN.indexOf(slice.length);
+            const block = exports.base58.decode(slice);
+            for (let j = 0; j < block.length - blockLen; j++) {
+                if (block[j] !== 0)
+                    throw new Error('base58xmr: wrong padding');
+            }
+            res = res.concat(Array.from(block.slice(block.length - blockLen)));
+        }
+        return Uint8Array.from(res);
+    },
+};
+const createBase58check = (sha256) => chain(checksum(4, (data) => sha256(sha256(data))), exports.base58);
+exports.createBase58check = createBase58check;
+// legacy export, bad name
+exports.base58check = exports.createBase58check;
+const BECH_ALPHABET = /* @__PURE__ */ chain(alphabet('qpzry9x8gf2tvdw0s3jn54khce6mua7l'), join(''));
+const POLYMOD_GENERATORS = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
+/**
+ * @__NO_SIDE_EFFECTS__
+ */
+function bech32Polymod(pre) {
+    const b = pre >> 25;
+    let chk = (pre & 0x1ffffff) << 5;
+    for (let i = 0; i < POLYMOD_GENERATORS.length; i++) {
+        if (((b >> i) & 1) === 1)
+            chk ^= POLYMOD_GENERATORS[i];
+    }
+    return chk;
+}
+/**
+ * @__NO_SIDE_EFFECTS__
+ */
+function bechChecksum(prefix, words, encodingConst = 1) {
+    const len = prefix.length;
+    let chk = 1;
+    for (let i = 0; i < len; i++) {
+        const c = prefix.charCodeAt(i);
+        if (c < 33 || c > 126)
+            throw new Error(`Invalid prefix (${prefix})`);
+        chk = bech32Polymod(chk) ^ (c >> 5);
+    }
+    chk = bech32Polymod(chk);
+    for (let i = 0; i < len; i++)
+        chk = bech32Polymod(chk) ^ (prefix.charCodeAt(i) & 0x1f);
+    for (let v of words)
+        chk = bech32Polymod(chk) ^ v;
+    for (let i = 0; i < 6; i++)
+        chk = bech32Polymod(chk);
+    chk ^= encodingConst;
+    return BECH_ALPHABET.encode(convertRadix2([chk % 2 ** 30], 30, 5, false));
+}
+/**
+ * @__NO_SIDE_EFFECTS__
+ */
+function genBech32(encoding) {
+    const ENCODING_CONST = encoding === 'bech32' ? 1 : 0x2bc830a3;
+    const _words = radix2(5);
+    const fromWords = _words.decode;
+    const toWords = _words.encode;
+    const fromWordsUnsafe = unsafeWrapper(fromWords);
+    function encode(prefix, words, limit = 90) {
+        if (typeof prefix !== 'string')
+            throw new Error(`bech32.encode prefix should be string, not ${typeof prefix}`);
+        if (!Array.isArray(words) || (words.length && typeof words[0] !== 'number'))
+            throw new Error(`bech32.encode words should be array of numbers, not ${typeof words}`);
+        if (prefix.length === 0)
+            throw new TypeError(`Invalid prefix length ${prefix.length}`);
+        const actualLength = prefix.length + 7 + words.length;
+        if (limit !== false && actualLength > limit)
+            throw new TypeError(`Length ${actualLength} exceeds limit ${limit}`);
+        const lowered = prefix.toLowerCase();
+        const sum = bechChecksum(lowered, words, ENCODING_CONST);
+        return `${lowered}1${BECH_ALPHABET.encode(words)}${sum}`;
+    }
+    function decode(str, limit = 90) {
+        if (typeof str !== 'string')
+            throw new Error(`bech32.decode input should be string, not ${typeof str}`);
+        if (str.length < 8 || (limit !== false && str.length > limit))
+            throw new TypeError(`Wrong string length: ${str.length} (${str}). Expected (8..${limit})`);
+        // don't allow mixed case
+        const lowered = str.toLowerCase();
+        if (str !== lowered && str !== str.toUpperCase())
+            throw new Error(`String must be lowercase or uppercase`);
+        const sepIndex = lowered.lastIndexOf('1');
+        if (sepIndex === 0 || sepIndex === -1)
+            throw new Error(`Letter "1" must be present between prefix and data only`);
+        const prefix = lowered.slice(0, sepIndex);
+        const data = lowered.slice(sepIndex + 1);
+        if (data.length < 6)
+            throw new Error('Data must be at least 6 characters long');
+        const words = BECH_ALPHABET.decode(data).slice(0, -6);
+        const sum = bechChecksum(prefix, words, ENCODING_CONST);
+        if (!data.endsWith(sum))
+            throw new Error(`Invalid checksum in ${str}: expected "${sum}"`);
+        return { prefix, words };
+    }
+    const decodeUnsafe = unsafeWrapper(decode);
+    function decodeToBytes(str) {
+        const { prefix, words } = decode(str, false);
+        return { prefix, words, bytes: fromWords(words) };
+    }
+    return { encode, decode, decodeToBytes, decodeUnsafe, fromWords, fromWordsUnsafe, toWords };
+}
+exports.bech32 = genBech32('bech32');
+exports.bech32m = genBech32('bech32m');
+exports.utf8 = {
+    encode: (data) => new TextDecoder().decode(data),
+    decode: (str) => new TextEncoder().encode(str),
+};
+exports.hex = chain(radix2(4), alphabet('0123456789abcdef'), join(''), normalize((s) => {
+    if (typeof s !== 'string' || s.length % 2)
+        throw new TypeError(`hex.decode: expected string, got ${typeof s} with length ${s.length}`);
+    return s.toLowerCase();
+}));
+// prettier-ignore
+const CODERS = {
+    utf8: exports.utf8, hex: exports.hex, base16: exports.base16, base32: exports.base32, base64: exports.base64, base64url: exports.base64url, base58: exports.base58, base58xmr: exports.base58xmr
+};
+const coderTypeError = 'Invalid encoding type. Available types: utf8, hex, base16, base32, base64, base64url, base58, base58xmr';
+const bytesToString = (type, bytes) => {
+    if (typeof type !== 'string' || !CODERS.hasOwnProperty(type))
+        throw new TypeError(coderTypeError);
+    if (!isBytes(bytes))
+        throw new TypeError('bytesToString() expects Uint8Array');
+    return CODERS[type].encode(bytes);
+};
+exports.bytesToString = bytesToString;
+exports.str = exports.bytesToString; // as in python, but for bytes only
+const stringToBytes = (type, str) => {
+    if (!CODERS.hasOwnProperty(type))
+        throw new TypeError(coderTypeError);
+    if (typeof str !== 'string')
+        throw new TypeError('stringToBytes() expects string');
+    return CODERS[type].decode(str);
+};
+exports.stringToBytes = stringToBytes;
+exports.bytes = exports.stringToBytes;
+
+},{}],2:[function(require,module,exports){
 'use strict'
 // base-x encoding / decoding
 // Copyright (c) 2018 base-x contributors
 // Copyright (c) 2014-2018 The Bitcoin Core developers (base58.cpp)
 // Distributed under the MIT software license, see the accompanying
 // file LICENSE or http://www.opensource.org/licenses/mit-license.php.
-// @ts-ignore
-var _Buffer = require('safe-buffer').Buffer
+Object.defineProperty(exports, '__esModule', { value: true })
 function base (ALPHABET) {
   if (ALPHABET.length >= 255) { throw new TypeError('Alphabet too long') }
-  var BASE_MAP = new Uint8Array(256)
-  BASE_MAP.fill(255)
-  for (var i = 0; i < ALPHABET.length; i++) {
-    var x = ALPHABET.charAt(i)
-    var xc = x.charCodeAt(0)
+  const BASE_MAP = new Uint8Array(256)
+  for (let j = 0; j < BASE_MAP.length; j++) {
+    BASE_MAP[j] = 255
+  }
+  for (let i = 0; i < ALPHABET.length; i++) {
+    const x = ALPHABET.charAt(i)
+    const xc = x.charCodeAt(0)
     if (BASE_MAP[xc] !== 255) { throw new TypeError(x + ' is ambiguous') }
     BASE_MAP[xc] = i
   }
-  var BASE = ALPHABET.length
-  var LEADER = ALPHABET.charAt(0)
-  var FACTOR = Math.log(BASE) / Math.log(256) // log(BASE) / log(256), rounded up
-  var iFACTOR = Math.log(256) / Math.log(BASE) // log(256) / log(BASE), rounded up
+  const BASE = ALPHABET.length
+  const LEADER = ALPHABET.charAt(0)
+  const FACTOR = Math.log(BASE) / Math.log(256) // log(BASE) / log(256), rounded up
+  const iFACTOR = Math.log(256) / Math.log(BASE) // log(256) / log(BASE), rounded up
   function encode (source) {
-    if (!_Buffer.isBuffer(source)) { throw new TypeError('Expected Buffer') }
+    // eslint-disable-next-line no-empty
+    if (source instanceof Uint8Array) { } else if (ArrayBuffer.isView(source)) {
+      source = new Uint8Array(source.buffer, source.byteOffset, source.byteLength)
+    } else if (Array.isArray(source)) {
+      source = Uint8Array.from(source)
+    }
+    if (!(source instanceof Uint8Array)) { throw new TypeError('Expected Uint8Array') }
     if (source.length === 0) { return '' }
-        // Skip & count leading zeroes.
-    var zeroes = 0
-    var length = 0
-    var pbegin = 0
-    var pend = source.length
+    // Skip & count leading zeroes.
+    let zeroes = 0
+    let length = 0
+    let pbegin = 0
+    const pend = source.length
     while (pbegin !== pend && source[pbegin] === 0) {
       pbegin++
       zeroes++
     }
-        // Allocate enough space in big-endian base58 representation.
-    var size = ((pend - pbegin) * iFACTOR + 1) >>> 0
-    var b58 = new Uint8Array(size)
-        // Process the bytes.
+    // Allocate enough space in big-endian base58 representation.
+    const size = ((pend - pbegin) * iFACTOR + 1) >>> 0
+    const b58 = new Uint8Array(size)
+    // Process the bytes.
     while (pbegin !== pend) {
-      var carry = source[pbegin]
-            // Apply "b58 = b58 * 256 + ch".
-      var i = 0
-      for (var it1 = size - 1; (carry !== 0 || i < length) && (it1 !== -1); it1--, i++) {
+      let carry = source[pbegin]
+      // Apply "b58 = b58 * 256 + ch".
+      let i = 0
+      for (let it1 = size - 1; (carry !== 0 || i < length) && (it1 !== -1); it1--, i++) {
         carry += (256 * b58[it1]) >>> 0
         b58[it1] = (carry % BASE) >>> 0
         carry = (carry / BASE) >>> 0
@@ -50,40 +540,42 @@ function base (ALPHABET) {
       length = i
       pbegin++
     }
-        // Skip leading zeroes in base58 result.
-    var it2 = size - length
+    // Skip leading zeroes in base58 result.
+    let it2 = size - length
     while (it2 !== size && b58[it2] === 0) {
       it2++
     }
-        // Translate the result into a string.
-    var str = LEADER.repeat(zeroes)
+    // Translate the result into a string.
+    let str = LEADER.repeat(zeroes)
     for (; it2 < size; ++it2) { str += ALPHABET.charAt(b58[it2]) }
     return str
   }
   function decodeUnsafe (source) {
     if (typeof source !== 'string') { throw new TypeError('Expected String') }
-    if (source.length === 0) { return _Buffer.alloc(0) }
-    var psz = 0
-        // Skip leading spaces.
-    if (source[psz] === ' ') { return }
-        // Skip and count leading '1's.
-    var zeroes = 0
-    var length = 0
+    if (source.length === 0) { return new Uint8Array() }
+    let psz = 0
+    // Skip and count leading '1's.
+    let zeroes = 0
+    let length = 0
     while (source[psz] === LEADER) {
       zeroes++
       psz++
     }
-        // Allocate enough space in big-endian base256 representation.
-    var size = (((source.length - psz) * FACTOR) + 1) >>> 0 // log(58) / log(256), rounded up.
-    var b256 = new Uint8Array(size)
-        // Process the characters.
-    while (source[psz]) {
-            // Decode character
-      var carry = BASE_MAP[source.charCodeAt(psz)]
-            // Invalid character
+    // Allocate enough space in big-endian base256 representation.
+    const size = (((source.length - psz) * FACTOR) + 1) >>> 0 // log(58) / log(256), rounded up.
+    const b256 = new Uint8Array(size)
+    // Process the characters.
+    while (psz < source.length) {
+      // Find code of next character
+      const charCode = source.charCodeAt(psz)
+      // Base map can not be indexed using char code
+      if (charCode > 255) { return }
+      // Decode character
+      let carry = BASE_MAP[charCode]
+      // Invalid character
       if (carry === 255) { return }
-      var i = 0
-      for (var it3 = size - 1; (carry !== 0 || i < length) && (it3 !== -1); it3--, i++) {
+      let i = 0
+      for (let it3 = size - 1; (carry !== 0 || i < length) && (it3 !== -1); it3--, i++) {
         carry += (BASE * b256[it3]) >>> 0
         b256[it3] = (carry % 256) >>> 0
         carry = (carry / 256) >>> 0
@@ -92,35 +584,32 @@ function base (ALPHABET) {
       length = i
       psz++
     }
-        // Skip trailing spaces.
-    if (source[psz] === ' ') { return }
-        // Skip leading zeroes in b256.
-    var it4 = size - length
+    // Skip leading zeroes in b256.
+    let it4 = size - length
     while (it4 !== size && b256[it4] === 0) {
       it4++
     }
-    var vch = _Buffer.allocUnsafe(zeroes + (size - it4))
-    vch.fill(0x00, 0, zeroes)
-    var j = zeroes
+    const vch = new Uint8Array(zeroes + (size - it4))
+    let j = zeroes
     while (it4 !== size) {
       vch[j++] = b256[it4++]
     }
     return vch
   }
   function decode (string) {
-    var buffer = decodeUnsafe(string)
+    const buffer = decodeUnsafe(string)
     if (buffer) { return buffer }
     throw new Error('Non-base' + BASE + ' character')
   }
   return {
-    encode: encode,
-    decodeUnsafe: decodeUnsafe,
-    decode: decode
+    encode,
+    decodeUnsafe,
+    decode
   }
 }
-module.exports = base
+exports.default = base
 
-},{"safe-buffer":128}],2:[function(require,module,exports){
+},{}],3:[function(require,module,exports){
 'use strict'
 
 exports.byteLength = byteLength
@@ -274,7 +763,7 @@ function fromByteArray (uint8) {
   return parts.join('')
 }
 
-},{}],3:[function(require,module,exports){
+},{}],4:[function(require,module,exports){
 (function (Buffer){
 /* bignumber.js v1.3.0 https://github.com/MikeMcl/bignumber.js/LICENCE */
 
@@ -2392,7 +2881,7 @@ P['valueOf'] = function () {
 module.exports = BigNumber;
 
 }).call(this,require("buffer").Buffer)
-},{"buffer":4}],4:[function(require,module,exports){
+},{"buffer":5}],5:[function(require,module,exports){
 (function (Buffer){
 /*!
  * The buffer module from node.js, for the browser.
@@ -4173,7 +4662,7 @@ function numberIsNaN (obj) {
 }
 
 }).call(this,require("buffer").Buffer)
-},{"base64-js":2,"buffer":4,"ieee754":35}],5:[function(require,module,exports){
+},{"base64-js":3,"buffer":5,"ieee754":36}],6:[function(require,module,exports){
 /*
  * The MIT License (MIT)
  *
@@ -4581,62 +5070,62 @@ else if (!global.CBOR)
 
 })(this);
 
-},{}],6:[function(require,module,exports){
+},{}],7:[function(require,module,exports){
 'use strict';
 
 module.exports = require('./es6/crc1').default;
 
-},{"./es6/crc1":17}],7:[function(require,module,exports){
+},{"./es6/crc1":18}],8:[function(require,module,exports){
 'use strict';
 
 module.exports = require('./es6/crc16').default;
 
-},{"./es6/crc16":18}],8:[function(require,module,exports){
+},{"./es6/crc16":19}],9:[function(require,module,exports){
 'use strict';
 
 module.exports = require('./es6/crc16ccitt').default;
 
-},{"./es6/crc16ccitt":19}],9:[function(require,module,exports){
+},{"./es6/crc16ccitt":20}],10:[function(require,module,exports){
 'use strict';
 
 module.exports = require('./es6/crc16kermit').default;
 
-},{"./es6/crc16kermit":20}],10:[function(require,module,exports){
+},{"./es6/crc16kermit":21}],11:[function(require,module,exports){
 'use strict';
 
 module.exports = require('./es6/crc16modbus').default;
 
-},{"./es6/crc16modbus":21}],11:[function(require,module,exports){
+},{"./es6/crc16modbus":22}],12:[function(require,module,exports){
 'use strict';
 
 module.exports = require('./es6/crc16xmodem').default;
 
-},{"./es6/crc16xmodem":22}],12:[function(require,module,exports){
+},{"./es6/crc16xmodem":23}],13:[function(require,module,exports){
 'use strict';
 
 module.exports = require('./es6/crc24').default;
 
-},{"./es6/crc24":23}],13:[function(require,module,exports){
+},{"./es6/crc24":24}],14:[function(require,module,exports){
 'use strict';
 
 module.exports = require('./es6/crc32').default;
 
-},{"./es6/crc32":24}],14:[function(require,module,exports){
+},{"./es6/crc32":25}],15:[function(require,module,exports){
 'use strict';
 
 module.exports = require('./es6/crc8').default;
 
-},{"./es6/crc8":25}],15:[function(require,module,exports){
+},{"./es6/crc8":26}],16:[function(require,module,exports){
 'use strict';
 
 module.exports = require('./es6/crc81wire').default;
 
-},{"./es6/crc81wire":26}],16:[function(require,module,exports){
+},{"./es6/crc81wire":27}],17:[function(require,module,exports){
 'use strict';
 
 module.exports = require('./es6/crcjam').default;
 
-},{"./es6/crcjam":27}],17:[function(require,module,exports){
+},{"./es6/crcjam":28}],18:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -4672,7 +5161,7 @@ var crc1 = (0, _define_crc2.default)('crc1', function (buf, previous) {
 
 exports.default = crc1;
 
-},{"./create_buffer":28,"./define_crc":29,"buffer":4}],18:[function(require,module,exports){
+},{"./create_buffer":29,"./define_crc":30,"buffer":5}],19:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -4712,7 +5201,7 @@ var crc16 = (0, _define_crc2.default)('crc-16', function (buf, previous) {
 
 exports.default = crc16;
 
-},{"./create_buffer":28,"./define_crc":29,"buffer":4}],19:[function(require,module,exports){
+},{"./create_buffer":29,"./define_crc":30,"buffer":5}],20:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -4752,7 +5241,7 @@ var crc16ccitt = (0, _define_crc2.default)('ccitt', function (buf, previous) {
 
 exports.default = crc16ccitt;
 
-},{"./create_buffer":28,"./define_crc":29,"buffer":4}],20:[function(require,module,exports){
+},{"./create_buffer":29,"./define_crc":30,"buffer":5}],21:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -4792,7 +5281,7 @@ var crc16kermit = (0, _define_crc2.default)('kermit', function (buf, previous) {
 
 exports.default = crc16kermit;
 
-},{"./create_buffer":28,"./define_crc":29,"buffer":4}],21:[function(require,module,exports){
+},{"./create_buffer":29,"./define_crc":30,"buffer":5}],22:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -4832,7 +5321,7 @@ var crc16modbus = (0, _define_crc2.default)('crc-16-modbus', function (buf, prev
 
 exports.default = crc16modbus;
 
-},{"./create_buffer":28,"./define_crc":29,"buffer":4}],22:[function(require,module,exports){
+},{"./create_buffer":29,"./define_crc":30,"buffer":5}],23:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -4875,7 +5364,7 @@ var crc16xmodem = (0, _define_crc2.default)('xmodem', function (buf, previous) {
 
 exports.default = crc16xmodem;
 
-},{"./create_buffer":28,"./define_crc":29,"buffer":4}],23:[function(require,module,exports){
+},{"./create_buffer":29,"./define_crc":30,"buffer":5}],24:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -4915,7 +5404,7 @@ var crc24 = (0, _define_crc2.default)('crc-24', function (buf, previous) {
 
 exports.default = crc24;
 
-},{"./create_buffer":28,"./define_crc":29,"buffer":4}],24:[function(require,module,exports){
+},{"./create_buffer":29,"./define_crc":30,"buffer":5}],25:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -4955,7 +5444,7 @@ var crc32 = (0, _define_crc2.default)('crc-32', function (buf, previous) {
 
 exports.default = crc32;
 
-},{"./create_buffer":28,"./define_crc":29,"buffer":4}],25:[function(require,module,exports){
+},{"./create_buffer":29,"./define_crc":30,"buffer":5}],26:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -4995,7 +5484,7 @@ var crc8 = (0, _define_crc2.default)('crc-8', function (buf, previous) {
 
 exports.default = crc8;
 
-},{"./create_buffer":28,"./define_crc":29,"buffer":4}],26:[function(require,module,exports){
+},{"./create_buffer":29,"./define_crc":30,"buffer":5}],27:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -5035,7 +5524,7 @@ var crc81wire = (0, _define_crc2.default)('dallas-1-wire', function (buf, previo
 
 exports.default = crc81wire;
 
-},{"./create_buffer":28,"./define_crc":29,"buffer":4}],27:[function(require,module,exports){
+},{"./create_buffer":29,"./define_crc":30,"buffer":5}],28:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -5077,7 +5566,7 @@ var crcjam = (0, _define_crc2.default)('jam', function (buf) {
 
 exports.default = crcjam;
 
-},{"./create_buffer":28,"./define_crc":29,"buffer":4}],28:[function(require,module,exports){
+},{"./create_buffer":29,"./define_crc":30,"buffer":5}],29:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -5093,7 +5582,7 @@ function (val) {
 
 exports.default = createBuffer;
 
-},{"buffer":4}],29:[function(require,module,exports){
+},{"buffer":5}],30:[function(require,module,exports){
 "use strict";
 
 Object.defineProperty(exports, "__esModule", {
@@ -5111,7 +5600,7 @@ exports.default = function (model, calc) {
   return fn;
 };
 
-},{}],30:[function(require,module,exports){
+},{}],31:[function(require,module,exports){
 'use strict';
 
 module.exports = {
@@ -5128,7 +5617,7 @@ module.exports = {
   crcjam: require('./crcjam')
 };
 
-},{"./crc1":6,"./crc16":7,"./crc16_ccitt":8,"./crc16_kermit":9,"./crc16_modbus":10,"./crc16_xmodem":11,"./crc24":12,"./crc32":13,"./crc8":14,"./crc8_1wire":15,"./crcjam":16}],31:[function(require,module,exports){
+},{"./crc1":7,"./crc16":8,"./crc16_ccitt":9,"./crc16_kermit":10,"./crc16_modbus":11,"./crc16_xmodem":12,"./crc24":13,"./crc32":14,"./crc8":15,"./crc8_1wire":16,"./crcjam":17}],32:[function(require,module,exports){
 'use strict';
 
 var groestl = require('./lib/groestl');
@@ -5168,7 +5657,7 @@ module.exports.groestl_2 = function(str,format, output) {
     return h.int32ArrayToHexString(a);
   }
 }
-},{"./lib/groestl":32,"./lib/helper":33}],32:[function(require,module,exports){
+},{"./lib/groestl":33,"./lib/helper":34}],33:[function(require,module,exports){
 /////////////////////////////////////
 ////////////  groestl ///////////////
 
@@ -6417,7 +6906,7 @@ module.exports = function(input, format, output) {
   }
   return out;
 }
-},{"./helper":33,"./op":34}],33:[function(require,module,exports){
+},{"./helper":34,"./op":35}],34:[function(require,module,exports){
 'use strict';
 // String functions
 
@@ -6671,7 +7160,7 @@ module.exports.b64Decode = function(input) {
 	}
 	return output;
 };
-},{"./op.js":34}],34:[function(require,module,exports){
+},{"./op.js":35}],35:[function(require,module,exports){
 'use strict';
 //the right shift is important, it has to do with 32 bit operations in javascript, it will make things faster
 function u64(h, l) {
@@ -7135,7 +7624,7 @@ module.exports.xORTable = function(d, s1, s2, len) {
   }
 }
 
-},{}],35:[function(require,module,exports){
+},{}],36:[function(require,module,exports){
 exports.read = function (buffer, offset, isLE, mLen, nBytes) {
   var e, m
   var eLen = (nBytes * 8) - mLen - 1
@@ -7221,7 +7710,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
   buffer[offset + i - d] |= s * 128
 }
 
-},{}],36:[function(require,module,exports){
+},{}],37:[function(require,module,exports){
 /*
  A JavaScript implementation of the SHA family of hashes, as
  defined in FIPS PUB 180-4 and FIPS PUB 202, as well as the corresponding
@@ -7252,7 +7741,7 @@ new m,new m,new m,new m,new m,new m];break;case "SHA-512":a=[new m,new m,new m,n
 2614888103,3248222580,3835390401,4022224774,264347078,604807628,770255983,1249150122,1555081692,1996064986,2554220882,2821834349,2952996808,3210313671,3336571891,3584528711,113926993,338241895,666307205,773529912,1294757372,1396182291,1695183700,1986661051,2177026350,2456956037,2730485921,2820302411,3259730800,3345764771,3516065817,3600352804,4094571909,275423344,430227734,506948616,659060556,883997877,958139571,1322822218,1537002063,1747873779,1955562222,2024104815,2227730452,2361852424,2428436474,
 2756734187,3204031479,3329325298];"function"===typeof define&&define.amd?define(function(){return w}):"undefined"!==typeof exports?("undefined"!==typeof module&&module.exports&&(module.exports=w),exports=w):I.jsSHA=w})(this);
 
-},{}],37:[function(require,module,exports){
+},{}],38:[function(require,module,exports){
 var getNative = require('./_getNative'),
     root = require('./_root');
 
@@ -7261,7 +7750,7 @@ var DataView = getNative(root, 'DataView');
 
 module.exports = DataView;
 
-},{"./_getNative":72,"./_root":102}],38:[function(require,module,exports){
+},{"./_getNative":73,"./_root":103}],39:[function(require,module,exports){
 var hashClear = require('./_hashClear'),
     hashDelete = require('./_hashDelete'),
     hashGet = require('./_hashGet'),
@@ -7295,7 +7784,7 @@ Hash.prototype.set = hashSet;
 
 module.exports = Hash;
 
-},{"./_hashClear":77,"./_hashDelete":78,"./_hashGet":79,"./_hashHas":80,"./_hashSet":81}],39:[function(require,module,exports){
+},{"./_hashClear":78,"./_hashDelete":79,"./_hashGet":80,"./_hashHas":81,"./_hashSet":82}],40:[function(require,module,exports){
 var listCacheClear = require('./_listCacheClear'),
     listCacheDelete = require('./_listCacheDelete'),
     listCacheGet = require('./_listCacheGet'),
@@ -7329,7 +7818,7 @@ ListCache.prototype.set = listCacheSet;
 
 module.exports = ListCache;
 
-},{"./_listCacheClear":86,"./_listCacheDelete":87,"./_listCacheGet":88,"./_listCacheHas":89,"./_listCacheSet":90}],40:[function(require,module,exports){
+},{"./_listCacheClear":87,"./_listCacheDelete":88,"./_listCacheGet":89,"./_listCacheHas":90,"./_listCacheSet":91}],41:[function(require,module,exports){
 var getNative = require('./_getNative'),
     root = require('./_root');
 
@@ -7338,7 +7827,7 @@ var Map = getNative(root, 'Map');
 
 module.exports = Map;
 
-},{"./_getNative":72,"./_root":102}],41:[function(require,module,exports){
+},{"./_getNative":73,"./_root":103}],42:[function(require,module,exports){
 var mapCacheClear = require('./_mapCacheClear'),
     mapCacheDelete = require('./_mapCacheDelete'),
     mapCacheGet = require('./_mapCacheGet'),
@@ -7372,7 +7861,7 @@ MapCache.prototype.set = mapCacheSet;
 
 module.exports = MapCache;
 
-},{"./_mapCacheClear":91,"./_mapCacheDelete":92,"./_mapCacheGet":93,"./_mapCacheHas":94,"./_mapCacheSet":95}],42:[function(require,module,exports){
+},{"./_mapCacheClear":92,"./_mapCacheDelete":93,"./_mapCacheGet":94,"./_mapCacheHas":95,"./_mapCacheSet":96}],43:[function(require,module,exports){
 var getNative = require('./_getNative'),
     root = require('./_root');
 
@@ -7381,7 +7870,7 @@ var Promise = getNative(root, 'Promise');
 
 module.exports = Promise;
 
-},{"./_getNative":72,"./_root":102}],43:[function(require,module,exports){
+},{"./_getNative":73,"./_root":103}],44:[function(require,module,exports){
 var getNative = require('./_getNative'),
     root = require('./_root');
 
@@ -7390,7 +7879,7 @@ var Set = getNative(root, 'Set');
 
 module.exports = Set;
 
-},{"./_getNative":72,"./_root":102}],44:[function(require,module,exports){
+},{"./_getNative":73,"./_root":103}],45:[function(require,module,exports){
 var MapCache = require('./_MapCache'),
     setCacheAdd = require('./_setCacheAdd'),
     setCacheHas = require('./_setCacheHas');
@@ -7419,7 +7908,7 @@ SetCache.prototype.has = setCacheHas;
 
 module.exports = SetCache;
 
-},{"./_MapCache":41,"./_setCacheAdd":103,"./_setCacheHas":104}],45:[function(require,module,exports){
+},{"./_MapCache":42,"./_setCacheAdd":104,"./_setCacheHas":105}],46:[function(require,module,exports){
 var ListCache = require('./_ListCache'),
     stackClear = require('./_stackClear'),
     stackDelete = require('./_stackDelete'),
@@ -7448,7 +7937,7 @@ Stack.prototype.set = stackSet;
 
 module.exports = Stack;
 
-},{"./_ListCache":39,"./_stackClear":106,"./_stackDelete":107,"./_stackGet":108,"./_stackHas":109,"./_stackSet":110}],46:[function(require,module,exports){
+},{"./_ListCache":40,"./_stackClear":107,"./_stackDelete":108,"./_stackGet":109,"./_stackHas":110,"./_stackSet":111}],47:[function(require,module,exports){
 var root = require('./_root');
 
 /** Built-in value references. */
@@ -7456,7 +7945,7 @@ var Symbol = root.Symbol;
 
 module.exports = Symbol;
 
-},{"./_root":102}],47:[function(require,module,exports){
+},{"./_root":103}],48:[function(require,module,exports){
 var root = require('./_root');
 
 /** Built-in value references. */
@@ -7464,7 +7953,7 @@ var Uint8Array = root.Uint8Array;
 
 module.exports = Uint8Array;
 
-},{"./_root":102}],48:[function(require,module,exports){
+},{"./_root":103}],49:[function(require,module,exports){
 var getNative = require('./_getNative'),
     root = require('./_root');
 
@@ -7473,7 +7962,7 @@ var WeakMap = getNative(root, 'WeakMap');
 
 module.exports = WeakMap;
 
-},{"./_getNative":72,"./_root":102}],49:[function(require,module,exports){
+},{"./_getNative":73,"./_root":103}],50:[function(require,module,exports){
 /**
  * A specialized version of `_.filter` for arrays without support for
  * iteratee shorthands.
@@ -7500,7 +7989,7 @@ function arrayFilter(array, predicate) {
 
 module.exports = arrayFilter;
 
-},{}],50:[function(require,module,exports){
+},{}],51:[function(require,module,exports){
 var baseTimes = require('./_baseTimes'),
     isArguments = require('./isArguments'),
     isArray = require('./isArray'),
@@ -7551,7 +8040,7 @@ function arrayLikeKeys(value, inherited) {
 
 module.exports = arrayLikeKeys;
 
-},{"./_baseTimes":62,"./_isIndex":82,"./isArguments":113,"./isArray":114,"./isBuffer":116,"./isTypedArray":122}],51:[function(require,module,exports){
+},{"./_baseTimes":63,"./_isIndex":83,"./isArguments":114,"./isArray":115,"./isBuffer":117,"./isTypedArray":123}],52:[function(require,module,exports){
 /**
  * Appends the elements of `values` to `array`.
  *
@@ -7573,7 +8062,7 @@ function arrayPush(array, values) {
 
 module.exports = arrayPush;
 
-},{}],52:[function(require,module,exports){
+},{}],53:[function(require,module,exports){
 /**
  * A specialized version of `_.some` for arrays without support for iteratee
  * shorthands.
@@ -7598,7 +8087,7 @@ function arraySome(array, predicate) {
 
 module.exports = arraySome;
 
-},{}],53:[function(require,module,exports){
+},{}],54:[function(require,module,exports){
 var eq = require('./eq');
 
 /**
@@ -7621,7 +8110,7 @@ function assocIndexOf(array, key) {
 
 module.exports = assocIndexOf;
 
-},{"./eq":112}],54:[function(require,module,exports){
+},{"./eq":113}],55:[function(require,module,exports){
 var arrayPush = require('./_arrayPush'),
     isArray = require('./isArray');
 
@@ -7643,7 +8132,7 @@ function baseGetAllKeys(object, keysFunc, symbolsFunc) {
 
 module.exports = baseGetAllKeys;
 
-},{"./_arrayPush":51,"./isArray":114}],55:[function(require,module,exports){
+},{"./_arrayPush":52,"./isArray":115}],56:[function(require,module,exports){
 var Symbol = require('./_Symbol'),
     getRawTag = require('./_getRawTag'),
     objectToString = require('./_objectToString');
@@ -7673,7 +8162,7 @@ function baseGetTag(value) {
 
 module.exports = baseGetTag;
 
-},{"./_Symbol":46,"./_getRawTag":73,"./_objectToString":100}],56:[function(require,module,exports){
+},{"./_Symbol":47,"./_getRawTag":74,"./_objectToString":101}],57:[function(require,module,exports){
 var baseGetTag = require('./_baseGetTag'),
     isObjectLike = require('./isObjectLike');
 
@@ -7693,7 +8182,7 @@ function baseIsArguments(value) {
 
 module.exports = baseIsArguments;
 
-},{"./_baseGetTag":55,"./isObjectLike":121}],57:[function(require,module,exports){
+},{"./_baseGetTag":56,"./isObjectLike":122}],58:[function(require,module,exports){
 var baseIsEqualDeep = require('./_baseIsEqualDeep'),
     isObjectLike = require('./isObjectLike');
 
@@ -7723,7 +8212,7 @@ function baseIsEqual(value, other, bitmask, customizer, stack) {
 
 module.exports = baseIsEqual;
 
-},{"./_baseIsEqualDeep":58,"./isObjectLike":121}],58:[function(require,module,exports){
+},{"./_baseIsEqualDeep":59,"./isObjectLike":122}],59:[function(require,module,exports){
 var Stack = require('./_Stack'),
     equalArrays = require('./_equalArrays'),
     equalByTag = require('./_equalByTag'),
@@ -7808,7 +8297,7 @@ function baseIsEqualDeep(object, other, bitmask, customizer, equalFunc, stack) {
 
 module.exports = baseIsEqualDeep;
 
-},{"./_Stack":45,"./_equalArrays":66,"./_equalByTag":67,"./_equalObjects":68,"./_getTag":75,"./isArray":114,"./isBuffer":116,"./isTypedArray":122}],59:[function(require,module,exports){
+},{"./_Stack":46,"./_equalArrays":67,"./_equalByTag":68,"./_equalObjects":69,"./_getTag":76,"./isArray":115,"./isBuffer":117,"./isTypedArray":123}],60:[function(require,module,exports){
 var isFunction = require('./isFunction'),
     isMasked = require('./_isMasked'),
     isObject = require('./isObject'),
@@ -7857,7 +8346,7 @@ function baseIsNative(value) {
 
 module.exports = baseIsNative;
 
-},{"./_isMasked":84,"./_toSource":111,"./isFunction":118,"./isObject":120}],60:[function(require,module,exports){
+},{"./_isMasked":85,"./_toSource":112,"./isFunction":119,"./isObject":121}],61:[function(require,module,exports){
 var baseGetTag = require('./_baseGetTag'),
     isLength = require('./isLength'),
     isObjectLike = require('./isObjectLike');
@@ -7919,7 +8408,7 @@ function baseIsTypedArray(value) {
 
 module.exports = baseIsTypedArray;
 
-},{"./_baseGetTag":55,"./isLength":119,"./isObjectLike":121}],61:[function(require,module,exports){
+},{"./_baseGetTag":56,"./isLength":120,"./isObjectLike":122}],62:[function(require,module,exports){
 var isPrototype = require('./_isPrototype'),
     nativeKeys = require('./_nativeKeys');
 
@@ -7951,7 +8440,7 @@ function baseKeys(object) {
 
 module.exports = baseKeys;
 
-},{"./_isPrototype":85,"./_nativeKeys":98}],62:[function(require,module,exports){
+},{"./_isPrototype":86,"./_nativeKeys":99}],63:[function(require,module,exports){
 /**
  * The base implementation of `_.times` without support for iteratee shorthands
  * or max array length checks.
@@ -7973,7 +8462,7 @@ function baseTimes(n, iteratee) {
 
 module.exports = baseTimes;
 
-},{}],63:[function(require,module,exports){
+},{}],64:[function(require,module,exports){
 /**
  * The base implementation of `_.unary` without support for storing metadata.
  *
@@ -7989,7 +8478,7 @@ function baseUnary(func) {
 
 module.exports = baseUnary;
 
-},{}],64:[function(require,module,exports){
+},{}],65:[function(require,module,exports){
 /**
  * Checks if a `cache` value for `key` exists.
  *
@@ -8004,7 +8493,7 @@ function cacheHas(cache, key) {
 
 module.exports = cacheHas;
 
-},{}],65:[function(require,module,exports){
+},{}],66:[function(require,module,exports){
 var root = require('./_root');
 
 /** Used to detect overreaching core-js shims. */
@@ -8012,7 +8501,7 @@ var coreJsData = root['__core-js_shared__'];
 
 module.exports = coreJsData;
 
-},{"./_root":102}],66:[function(require,module,exports){
+},{"./_root":103}],67:[function(require,module,exports){
 var SetCache = require('./_SetCache'),
     arraySome = require('./_arraySome'),
     cacheHas = require('./_cacheHas');
@@ -8042,10 +8531,11 @@ function equalArrays(array, other, bitmask, customizer, equalFunc, stack) {
   if (arrLength != othLength && !(isPartial && othLength > arrLength)) {
     return false;
   }
-  // Assume cyclic values are equal.
-  var stacked = stack.get(array);
-  if (stacked && stack.get(other)) {
-    return stacked == other;
+  // Check that cyclic values are equal.
+  var arrStacked = stack.get(array);
+  var othStacked = stack.get(other);
+  if (arrStacked && othStacked) {
+    return arrStacked == other && othStacked == array;
   }
   var index = -1,
       result = true,
@@ -8097,7 +8587,7 @@ function equalArrays(array, other, bitmask, customizer, equalFunc, stack) {
 
 module.exports = equalArrays;
 
-},{"./_SetCache":44,"./_arraySome":52,"./_cacheHas":64}],67:[function(require,module,exports){
+},{"./_SetCache":45,"./_arraySome":53,"./_cacheHas":65}],68:[function(require,module,exports){
 var Symbol = require('./_Symbol'),
     Uint8Array = require('./_Uint8Array'),
     eq = require('./eq'),
@@ -8211,7 +8701,7 @@ function equalByTag(object, other, tag, bitmask, customizer, equalFunc, stack) {
 
 module.exports = equalByTag;
 
-},{"./_Symbol":46,"./_Uint8Array":47,"./_equalArrays":66,"./_mapToArray":96,"./_setToArray":105,"./eq":112}],68:[function(require,module,exports){
+},{"./_Symbol":47,"./_Uint8Array":48,"./_equalArrays":67,"./_mapToArray":97,"./_setToArray":106,"./eq":113}],69:[function(require,module,exports){
 var getAllKeys = require('./_getAllKeys');
 
 /** Used to compose bitmasks for value comparisons. */
@@ -8253,10 +8743,11 @@ function equalObjects(object, other, bitmask, customizer, equalFunc, stack) {
       return false;
     }
   }
-  // Assume cyclic values are equal.
-  var stacked = stack.get(object);
-  if (stacked && stack.get(other)) {
-    return stacked == other;
+  // Check that cyclic values are equal.
+  var objStacked = stack.get(object);
+  var othStacked = stack.get(other);
+  if (objStacked && othStacked) {
+    return objStacked == other && othStacked == object;
   }
   var result = true;
   stack.set(object, other);
@@ -8302,7 +8793,7 @@ function equalObjects(object, other, bitmask, customizer, equalFunc, stack) {
 
 module.exports = equalObjects;
 
-},{"./_getAllKeys":70}],69:[function(require,module,exports){
+},{"./_getAllKeys":71}],70:[function(require,module,exports){
 (function (global){
 /** Detect free variable `global` from Node.js. */
 var freeGlobal = typeof global == 'object' && global && global.Object === Object && global;
@@ -8310,7 +8801,7 @@ var freeGlobal = typeof global == 'object' && global && global.Object === Object
 module.exports = freeGlobal;
 
 }).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{}],70:[function(require,module,exports){
+},{}],71:[function(require,module,exports){
 var baseGetAllKeys = require('./_baseGetAllKeys'),
     getSymbols = require('./_getSymbols'),
     keys = require('./keys');
@@ -8328,7 +8819,7 @@ function getAllKeys(object) {
 
 module.exports = getAllKeys;
 
-},{"./_baseGetAllKeys":54,"./_getSymbols":74,"./keys":123}],71:[function(require,module,exports){
+},{"./_baseGetAllKeys":55,"./_getSymbols":75,"./keys":124}],72:[function(require,module,exports){
 var isKeyable = require('./_isKeyable');
 
 /**
@@ -8348,7 +8839,7 @@ function getMapData(map, key) {
 
 module.exports = getMapData;
 
-},{"./_isKeyable":83}],72:[function(require,module,exports){
+},{"./_isKeyable":84}],73:[function(require,module,exports){
 var baseIsNative = require('./_baseIsNative'),
     getValue = require('./_getValue');
 
@@ -8367,7 +8858,7 @@ function getNative(object, key) {
 
 module.exports = getNative;
 
-},{"./_baseIsNative":59,"./_getValue":76}],73:[function(require,module,exports){
+},{"./_baseIsNative":60,"./_getValue":77}],74:[function(require,module,exports){
 var Symbol = require('./_Symbol');
 
 /** Used for built-in method references. */
@@ -8415,7 +8906,7 @@ function getRawTag(value) {
 
 module.exports = getRawTag;
 
-},{"./_Symbol":46}],74:[function(require,module,exports){
+},{"./_Symbol":47}],75:[function(require,module,exports){
 var arrayFilter = require('./_arrayFilter'),
     stubArray = require('./stubArray');
 
@@ -8447,7 +8938,7 @@ var getSymbols = !nativeGetSymbols ? stubArray : function(object) {
 
 module.exports = getSymbols;
 
-},{"./_arrayFilter":49,"./stubArray":124}],75:[function(require,module,exports){
+},{"./_arrayFilter":50,"./stubArray":125}],76:[function(require,module,exports){
 var DataView = require('./_DataView'),
     Map = require('./_Map'),
     Promise = require('./_Promise'),
@@ -8507,7 +8998,7 @@ if ((DataView && getTag(new DataView(new ArrayBuffer(1))) != dataViewTag) ||
 
 module.exports = getTag;
 
-},{"./_DataView":37,"./_Map":40,"./_Promise":42,"./_Set":43,"./_WeakMap":48,"./_baseGetTag":55,"./_toSource":111}],76:[function(require,module,exports){
+},{"./_DataView":38,"./_Map":41,"./_Promise":43,"./_Set":44,"./_WeakMap":49,"./_baseGetTag":56,"./_toSource":112}],77:[function(require,module,exports){
 /**
  * Gets the value at `key` of `object`.
  *
@@ -8522,7 +9013,7 @@ function getValue(object, key) {
 
 module.exports = getValue;
 
-},{}],77:[function(require,module,exports){
+},{}],78:[function(require,module,exports){
 var nativeCreate = require('./_nativeCreate');
 
 /**
@@ -8539,7 +9030,7 @@ function hashClear() {
 
 module.exports = hashClear;
 
-},{"./_nativeCreate":97}],78:[function(require,module,exports){
+},{"./_nativeCreate":98}],79:[function(require,module,exports){
 /**
  * Removes `key` and its value from the hash.
  *
@@ -8558,7 +9049,7 @@ function hashDelete(key) {
 
 module.exports = hashDelete;
 
-},{}],79:[function(require,module,exports){
+},{}],80:[function(require,module,exports){
 var nativeCreate = require('./_nativeCreate');
 
 /** Used to stand-in for `undefined` hash values. */
@@ -8590,7 +9081,7 @@ function hashGet(key) {
 
 module.exports = hashGet;
 
-},{"./_nativeCreate":97}],80:[function(require,module,exports){
+},{"./_nativeCreate":98}],81:[function(require,module,exports){
 var nativeCreate = require('./_nativeCreate');
 
 /** Used for built-in method references. */
@@ -8615,7 +9106,7 @@ function hashHas(key) {
 
 module.exports = hashHas;
 
-},{"./_nativeCreate":97}],81:[function(require,module,exports){
+},{"./_nativeCreate":98}],82:[function(require,module,exports){
 var nativeCreate = require('./_nativeCreate');
 
 /** Used to stand-in for `undefined` hash values. */
@@ -8640,7 +9131,7 @@ function hashSet(key, value) {
 
 module.exports = hashSet;
 
-},{"./_nativeCreate":97}],82:[function(require,module,exports){
+},{"./_nativeCreate":98}],83:[function(require,module,exports){
 /** Used as references for various `Number` constants. */
 var MAX_SAFE_INTEGER = 9007199254740991;
 
@@ -8667,7 +9158,7 @@ function isIndex(value, length) {
 
 module.exports = isIndex;
 
-},{}],83:[function(require,module,exports){
+},{}],84:[function(require,module,exports){
 /**
  * Checks if `value` is suitable for use as unique object key.
  *
@@ -8684,7 +9175,7 @@ function isKeyable(value) {
 
 module.exports = isKeyable;
 
-},{}],84:[function(require,module,exports){
+},{}],85:[function(require,module,exports){
 var coreJsData = require('./_coreJsData');
 
 /** Used to detect methods masquerading as native. */
@@ -8706,7 +9197,7 @@ function isMasked(func) {
 
 module.exports = isMasked;
 
-},{"./_coreJsData":65}],85:[function(require,module,exports){
+},{"./_coreJsData":66}],86:[function(require,module,exports){
 /** Used for built-in method references. */
 var objectProto = Object.prototype;
 
@@ -8726,7 +9217,7 @@ function isPrototype(value) {
 
 module.exports = isPrototype;
 
-},{}],86:[function(require,module,exports){
+},{}],87:[function(require,module,exports){
 /**
  * Removes all key-value entries from the list cache.
  *
@@ -8741,7 +9232,7 @@ function listCacheClear() {
 
 module.exports = listCacheClear;
 
-},{}],87:[function(require,module,exports){
+},{}],88:[function(require,module,exports){
 var assocIndexOf = require('./_assocIndexOf');
 
 /** Used for built-in method references. */
@@ -8778,7 +9269,7 @@ function listCacheDelete(key) {
 
 module.exports = listCacheDelete;
 
-},{"./_assocIndexOf":53}],88:[function(require,module,exports){
+},{"./_assocIndexOf":54}],89:[function(require,module,exports){
 var assocIndexOf = require('./_assocIndexOf');
 
 /**
@@ -8799,7 +9290,7 @@ function listCacheGet(key) {
 
 module.exports = listCacheGet;
 
-},{"./_assocIndexOf":53}],89:[function(require,module,exports){
+},{"./_assocIndexOf":54}],90:[function(require,module,exports){
 var assocIndexOf = require('./_assocIndexOf');
 
 /**
@@ -8817,7 +9308,7 @@ function listCacheHas(key) {
 
 module.exports = listCacheHas;
 
-},{"./_assocIndexOf":53}],90:[function(require,module,exports){
+},{"./_assocIndexOf":54}],91:[function(require,module,exports){
 var assocIndexOf = require('./_assocIndexOf');
 
 /**
@@ -8845,7 +9336,7 @@ function listCacheSet(key, value) {
 
 module.exports = listCacheSet;
 
-},{"./_assocIndexOf":53}],91:[function(require,module,exports){
+},{"./_assocIndexOf":54}],92:[function(require,module,exports){
 var Hash = require('./_Hash'),
     ListCache = require('./_ListCache'),
     Map = require('./_Map');
@@ -8868,7 +9359,7 @@ function mapCacheClear() {
 
 module.exports = mapCacheClear;
 
-},{"./_Hash":38,"./_ListCache":39,"./_Map":40}],92:[function(require,module,exports){
+},{"./_Hash":39,"./_ListCache":40,"./_Map":41}],93:[function(require,module,exports){
 var getMapData = require('./_getMapData');
 
 /**
@@ -8888,7 +9379,7 @@ function mapCacheDelete(key) {
 
 module.exports = mapCacheDelete;
 
-},{"./_getMapData":71}],93:[function(require,module,exports){
+},{"./_getMapData":72}],94:[function(require,module,exports){
 var getMapData = require('./_getMapData');
 
 /**
@@ -8906,7 +9397,7 @@ function mapCacheGet(key) {
 
 module.exports = mapCacheGet;
 
-},{"./_getMapData":71}],94:[function(require,module,exports){
+},{"./_getMapData":72}],95:[function(require,module,exports){
 var getMapData = require('./_getMapData');
 
 /**
@@ -8924,7 +9415,7 @@ function mapCacheHas(key) {
 
 module.exports = mapCacheHas;
 
-},{"./_getMapData":71}],95:[function(require,module,exports){
+},{"./_getMapData":72}],96:[function(require,module,exports){
 var getMapData = require('./_getMapData');
 
 /**
@@ -8948,7 +9439,7 @@ function mapCacheSet(key, value) {
 
 module.exports = mapCacheSet;
 
-},{"./_getMapData":71}],96:[function(require,module,exports){
+},{"./_getMapData":72}],97:[function(require,module,exports){
 /**
  * Converts `map` to its key-value pairs.
  *
@@ -8968,7 +9459,7 @@ function mapToArray(map) {
 
 module.exports = mapToArray;
 
-},{}],97:[function(require,module,exports){
+},{}],98:[function(require,module,exports){
 var getNative = require('./_getNative');
 
 /* Built-in method references that are verified to be native. */
@@ -8976,7 +9467,7 @@ var nativeCreate = getNative(Object, 'create');
 
 module.exports = nativeCreate;
 
-},{"./_getNative":72}],98:[function(require,module,exports){
+},{"./_getNative":73}],99:[function(require,module,exports){
 var overArg = require('./_overArg');
 
 /* Built-in method references for those with the same name as other `lodash` methods. */
@@ -8984,7 +9475,7 @@ var nativeKeys = overArg(Object.keys, Object);
 
 module.exports = nativeKeys;
 
-},{"./_overArg":101}],99:[function(require,module,exports){
+},{"./_overArg":102}],100:[function(require,module,exports){
 var freeGlobal = require('./_freeGlobal');
 
 /** Detect free variable `exports`. */
@@ -9016,7 +9507,7 @@ var nodeUtil = (function() {
 
 module.exports = nodeUtil;
 
-},{"./_freeGlobal":69}],100:[function(require,module,exports){
+},{"./_freeGlobal":70}],101:[function(require,module,exports){
 /** Used for built-in method references. */
 var objectProto = Object.prototype;
 
@@ -9040,7 +9531,7 @@ function objectToString(value) {
 
 module.exports = objectToString;
 
-},{}],101:[function(require,module,exports){
+},{}],102:[function(require,module,exports){
 /**
  * Creates a unary function that invokes `func` with its argument transformed.
  *
@@ -9057,7 +9548,7 @@ function overArg(func, transform) {
 
 module.exports = overArg;
 
-},{}],102:[function(require,module,exports){
+},{}],103:[function(require,module,exports){
 var freeGlobal = require('./_freeGlobal');
 
 /** Detect free variable `self`. */
@@ -9068,7 +9559,7 @@ var root = freeGlobal || freeSelf || Function('return this')();
 
 module.exports = root;
 
-},{"./_freeGlobal":69}],103:[function(require,module,exports){
+},{"./_freeGlobal":70}],104:[function(require,module,exports){
 /** Used to stand-in for `undefined` hash values. */
 var HASH_UNDEFINED = '__lodash_hash_undefined__';
 
@@ -9089,7 +9580,7 @@ function setCacheAdd(value) {
 
 module.exports = setCacheAdd;
 
-},{}],104:[function(require,module,exports){
+},{}],105:[function(require,module,exports){
 /**
  * Checks if `value` is in the array cache.
  *
@@ -9105,7 +9596,7 @@ function setCacheHas(value) {
 
 module.exports = setCacheHas;
 
-},{}],105:[function(require,module,exports){
+},{}],106:[function(require,module,exports){
 /**
  * Converts `set` to an array of its values.
  *
@@ -9125,7 +9616,7 @@ function setToArray(set) {
 
 module.exports = setToArray;
 
-},{}],106:[function(require,module,exports){
+},{}],107:[function(require,module,exports){
 var ListCache = require('./_ListCache');
 
 /**
@@ -9142,7 +9633,7 @@ function stackClear() {
 
 module.exports = stackClear;
 
-},{"./_ListCache":39}],107:[function(require,module,exports){
+},{"./_ListCache":40}],108:[function(require,module,exports){
 /**
  * Removes `key` and its value from the stack.
  *
@@ -9162,7 +9653,7 @@ function stackDelete(key) {
 
 module.exports = stackDelete;
 
-},{}],108:[function(require,module,exports){
+},{}],109:[function(require,module,exports){
 /**
  * Gets the stack value for `key`.
  *
@@ -9178,7 +9669,7 @@ function stackGet(key) {
 
 module.exports = stackGet;
 
-},{}],109:[function(require,module,exports){
+},{}],110:[function(require,module,exports){
 /**
  * Checks if a stack value for `key` exists.
  *
@@ -9194,7 +9685,7 @@ function stackHas(key) {
 
 module.exports = stackHas;
 
-},{}],110:[function(require,module,exports){
+},{}],111:[function(require,module,exports){
 var ListCache = require('./_ListCache'),
     Map = require('./_Map'),
     MapCache = require('./_MapCache');
@@ -9230,7 +9721,7 @@ function stackSet(key, value) {
 
 module.exports = stackSet;
 
-},{"./_ListCache":39,"./_Map":40,"./_MapCache":41}],111:[function(require,module,exports){
+},{"./_ListCache":40,"./_Map":41,"./_MapCache":42}],112:[function(require,module,exports){
 /** Used for built-in method references. */
 var funcProto = Function.prototype;
 
@@ -9258,7 +9749,7 @@ function toSource(func) {
 
 module.exports = toSource;
 
-},{}],112:[function(require,module,exports){
+},{}],113:[function(require,module,exports){
 /**
  * Performs a
  * [`SameValueZero`](http://ecma-international.org/ecma-262/7.0/#sec-samevaluezero)
@@ -9297,7 +9788,7 @@ function eq(value, other) {
 
 module.exports = eq;
 
-},{}],113:[function(require,module,exports){
+},{}],114:[function(require,module,exports){
 var baseIsArguments = require('./_baseIsArguments'),
     isObjectLike = require('./isObjectLike');
 
@@ -9335,7 +9826,7 @@ var isArguments = baseIsArguments(function() { return arguments; }()) ? baseIsAr
 
 module.exports = isArguments;
 
-},{"./_baseIsArguments":56,"./isObjectLike":121}],114:[function(require,module,exports){
+},{"./_baseIsArguments":57,"./isObjectLike":122}],115:[function(require,module,exports){
 /**
  * Checks if `value` is classified as an `Array` object.
  *
@@ -9363,7 +9854,7 @@ var isArray = Array.isArray;
 
 module.exports = isArray;
 
-},{}],115:[function(require,module,exports){
+},{}],116:[function(require,module,exports){
 var isFunction = require('./isFunction'),
     isLength = require('./isLength');
 
@@ -9398,7 +9889,7 @@ function isArrayLike(value) {
 
 module.exports = isArrayLike;
 
-},{"./isFunction":118,"./isLength":119}],116:[function(require,module,exports){
+},{"./isFunction":119,"./isLength":120}],117:[function(require,module,exports){
 var root = require('./_root'),
     stubFalse = require('./stubFalse');
 
@@ -9438,7 +9929,7 @@ var isBuffer = nativeIsBuffer || stubFalse;
 
 module.exports = isBuffer;
 
-},{"./_root":102,"./stubFalse":125}],117:[function(require,module,exports){
+},{"./_root":103,"./stubFalse":126}],118:[function(require,module,exports){
 var baseIsEqual = require('./_baseIsEqual');
 
 /**
@@ -9475,7 +9966,7 @@ function isEqual(value, other) {
 
 module.exports = isEqual;
 
-},{"./_baseIsEqual":57}],118:[function(require,module,exports){
+},{"./_baseIsEqual":58}],119:[function(require,module,exports){
 var baseGetTag = require('./_baseGetTag'),
     isObject = require('./isObject');
 
@@ -9514,7 +10005,7 @@ function isFunction(value) {
 
 module.exports = isFunction;
 
-},{"./_baseGetTag":55,"./isObject":120}],119:[function(require,module,exports){
+},{"./_baseGetTag":56,"./isObject":121}],120:[function(require,module,exports){
 /** Used as references for various `Number` constants. */
 var MAX_SAFE_INTEGER = 9007199254740991;
 
@@ -9551,7 +10042,7 @@ function isLength(value) {
 
 module.exports = isLength;
 
-},{}],120:[function(require,module,exports){
+},{}],121:[function(require,module,exports){
 /**
  * Checks if `value` is the
  * [language type](http://www.ecma-international.org/ecma-262/7.0/#sec-ecmascript-language-types)
@@ -9584,7 +10075,7 @@ function isObject(value) {
 
 module.exports = isObject;
 
-},{}],121:[function(require,module,exports){
+},{}],122:[function(require,module,exports){
 /**
  * Checks if `value` is object-like. A value is object-like if it's not `null`
  * and has a `typeof` result of "object".
@@ -9615,7 +10106,7 @@ function isObjectLike(value) {
 
 module.exports = isObjectLike;
 
-},{}],122:[function(require,module,exports){
+},{}],123:[function(require,module,exports){
 var baseIsTypedArray = require('./_baseIsTypedArray'),
     baseUnary = require('./_baseUnary'),
     nodeUtil = require('./_nodeUtil');
@@ -9644,7 +10135,7 @@ var isTypedArray = nodeIsTypedArray ? baseUnary(nodeIsTypedArray) : baseIsTypedA
 
 module.exports = isTypedArray;
 
-},{"./_baseIsTypedArray":60,"./_baseUnary":63,"./_nodeUtil":99}],123:[function(require,module,exports){
+},{"./_baseIsTypedArray":61,"./_baseUnary":64,"./_nodeUtil":100}],124:[function(require,module,exports){
 var arrayLikeKeys = require('./_arrayLikeKeys'),
     baseKeys = require('./_baseKeys'),
     isArrayLike = require('./isArrayLike');
@@ -9683,7 +10174,7 @@ function keys(object) {
 
 module.exports = keys;
 
-},{"./_arrayLikeKeys":50,"./_baseKeys":61,"./isArrayLike":115}],124:[function(require,module,exports){
+},{"./_arrayLikeKeys":51,"./_baseKeys":62,"./isArrayLike":116}],125:[function(require,module,exports){
 /**
  * This method returns a new empty array.
  *
@@ -9708,7 +10199,7 @@ function stubArray() {
 
 module.exports = stubArray;
 
-},{}],125:[function(require,module,exports){
+},{}],126:[function(require,module,exports){
 /**
  * This method returns `false`.
  *
@@ -9728,7 +10219,7 @@ function stubFalse() {
 
 module.exports = stubFalse;
 
-},{}],126:[function(require,module,exports){
+},{}],127:[function(require,module,exports){
 (function (process){
 // .dirname, .basename, and .extname methods are extracted from Node.js v8.11.1,
 // backported and transplited with Babel, with backwards-compat fixes
@@ -10034,7 +10525,7 @@ var substr = 'ab'.substr(-1) === 'b'
 ;
 
 }).call(this,require('_process'))
-},{"_process":127}],127:[function(require,module,exports){
+},{"_process":128}],128:[function(require,module,exports){
 // shim for using process in browser
 var process = module.exports = {};
 
@@ -10220,71 +10711,7 @@ process.chdir = function (dir) {
 };
 process.umask = function() { return 0; };
 
-},{}],128:[function(require,module,exports){
-/* eslint-disable node/no-deprecated-api */
-var buffer = require('buffer')
-var Buffer = buffer.Buffer
-
-// alternative to using Object.keys for old browsers
-function copyProps (src, dst) {
-  for (var key in src) {
-    dst[key] = src[key]
-  }
-}
-if (Buffer.from && Buffer.alloc && Buffer.allocUnsafe && Buffer.allocUnsafeSlow) {
-  module.exports = buffer
-} else {
-  // Copy properties from require('buffer')
-  copyProps(buffer, exports)
-  exports.Buffer = SafeBuffer
-}
-
-function SafeBuffer (arg, encodingOrOffset, length) {
-  return Buffer(arg, encodingOrOffset, length)
-}
-
-// Copy static methods from Buffer
-copyProps(Buffer, SafeBuffer)
-
-SafeBuffer.from = function (arg, encodingOrOffset, length) {
-  if (typeof arg === 'number') {
-    throw new TypeError('Argument must not be a number')
-  }
-  return Buffer(arg, encodingOrOffset, length)
-}
-
-SafeBuffer.alloc = function (size, fill, encoding) {
-  if (typeof size !== 'number') {
-    throw new TypeError('Argument must be a number')
-  }
-  var buf = Buffer(size)
-  if (fill !== undefined) {
-    if (typeof encoding === 'string') {
-      buf.fill(fill, encoding)
-    } else {
-      buf.fill(fill)
-    }
-  } else {
-    buf.fill(0)
-  }
-  return buf
-}
-
-SafeBuffer.allocUnsafe = function (size) {
-  if (typeof size !== 'number') {
-    throw new TypeError('Argument must be a number')
-  }
-  return Buffer(size)
-}
-
-SafeBuffer.allocUnsafeSlow = function (size) {
-  if (typeof size !== 'number') {
-    throw new TypeError('Argument must be a number')
-  }
-  return buffer.SlowBuffer(size)
-}
-
-},{"buffer":4}],129:[function(require,module,exports){
+},{}],129:[function(require,module,exports){
 var cbor = require('cbor-js');
 var CRC = require('crc');
 var base58 = require('./crypto/base58');
@@ -10348,7 +10775,7 @@ module.exports = {
     }
 };
 
-},{"./crypto/base58":137,"./crypto/bech32":138,"cbor-js":5,"crc":30}],130:[function(require,module,exports){
+},{"./crypto/base58":137,"./crypto/bech32":138,"cbor-js":6,"crc":31}],130:[function(require,module,exports){
 var base58 = require('./crypto/base58')
 
 const ALLOWED_CHARS = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
@@ -10527,8 +10954,8 @@ function getAddressType(address, currency) {
             return null;
         }
 
-        if(currency.regex) {
-            if(!currency.regex.test(address)) {
+        if (currency.regex) {
+            if (!currency.regex.test(address)) {
                 return null;
             }
         }
@@ -10561,14 +10988,14 @@ function isValidP2PKHandP2SHAddress(address, currency, networkType) {
 }
 
 module.exports = {
-    isValidAddress: function (address, currency, networkType) {        
+    isValidAddress: function (address, currency, networkType) {
         networkType = networkType || DEFAULT_NETWORK_TYPE;
         return isValidP2PKHandP2SHAddress(address, currency, networkType) || segwit.isValidAddress(address, currency, networkType);
     }
 };
 
 }).call(this,require("buffer").Buffer)
-},{"./crypto/base58":137,"./crypto/segwit_addr":143,"./crypto/utils":145,"buffer":4}],136:[function(require,module,exports){
+},{"./crypto/base58":137,"./crypto/segwit_addr":143,"./crypto/utils":145,"buffer":5}],136:[function(require,module,exports){
 var alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 
  /**
@@ -12445,7 +12872,7 @@ Blake256.prototype.digest = function (encoding) {
 
 module.exports = Blake256;
 }).call(this,require("buffer").Buffer)
-},{"buffer":4}],141:[function(require,module,exports){
+},{"buffer":5}],141:[function(require,module,exports){
 'use strict';
 
 /**
@@ -12972,84 +13399,120 @@ module.exports = cnBase58;
 // THE SOFTWARE.
 
 var bech32 = require('./bech32');
+var { bech32m } = require('@scure/base');
 
 function convertbits(data, frombits, tobits, pad) {
-  var acc = 0;
-  var bits = 0;
-  var ret = [];
-  var maxv = (1 << tobits) - 1;
-  for (var p = 0; p < data.length; ++p) {
-    var value = data[p];
-    if (value < 0 || (value >> frombits) !== 0) {
-      return null;
+    var acc = 0;
+    var bits = 0;
+    var ret = [];
+    var maxv = (1 << tobits) - 1;
+    for (var p = 0; p < data.length; ++p) {
+        var value = data[p];
+        if (value < 0 || (value >> frombits) !== 0) {
+            return null;
+        }
+        acc = (acc << frombits) | value;
+        bits += frombits;
+        while (bits >= tobits) {
+            bits -= tobits;
+            ret.push((acc >> bits) & maxv);
+        }
     }
-    acc = (acc << frombits) | value;
-    bits += frombits;
-    while (bits >= tobits) {
-      bits -= tobits;
-      ret.push((acc >> bits) & maxv);
+    if (pad) {
+        if (bits > 0) {
+            ret.push((acc << (tobits - bits)) & maxv);
+        }
+    } else if (bits >= frombits || ((acc << (tobits - bits)) & maxv)) {
+        return null;
     }
-  }
-  if (pad) {
-    if (bits > 0) {
-      ret.push((acc << (tobits - bits)) & maxv);
-    }
-  } else if (bits >= frombits || ((acc << (tobits - bits)) & maxv)) {
-    return null;
-  }
-  return ret;
+    return ret;
 }
 
 function decode(hrp, addr) {
-  var dec = bech32.decode(addr);
-  if (dec === null || dec.hrp !== hrp || dec.data.length < 1 || dec.data[0] > 16) {
-    return null;
-  }
-  var res = convertbits(dec.data.slice(1), 5, 8, false);
-  if (res === null || res.length < 2 || res.length > 40) {
-    return null;
-  }
-  if (dec.data[0] === 0 && res.length !== 20 && res.length !== 32) {
-    return null;
-  }
-  return { version: dec.data[0], program: res };
+    var dec = bech32.decode(addr);
+    if (dec === null || dec.hrp !== hrp || dec.data.length < 1 || dec.data[0] > 16) {
+        return null;
+    }
+    var res = convertbits(dec.data.slice(1), 5, 8, false);
+    if (res === null || res.length < 2 || res.length > 40) {
+        return null;
+    }
+    if (dec.data[0] === 0 && res.length !== 20 && res.length !== 32) {
+        return null;
+    }
+    return { version: dec.data[0], program: res };
 }
 
 function encode(hrp, version, program) {
-  var ret = bech32.encode(hrp, [version].concat(convertbits(program, 8, 5, true)));
-  if (decode(hrp, ret) === null) {
-    return null;
-  }
-  return ret;
+    var ret = bech32.encode(hrp, [version].concat(convertbits(program, 8, 5, true)));
+    if (decode(hrp, ret) === null) {
+        return null;
+    }
+    return ret;
+}
+
+function decodeBech32m(hrp, addr) {
+    var dec = bech32m.decode(addr);
+    console.log(dec);
+    if (dec === null || dec.prefix !== hrp || dec.words.length < 1 || dec.words[0] > 16) {
+        return null;
+    }
+    var res = convertbits(dec.words.slice(1), 5, 8, false);
+    if (res === null || res.length < 2 || res.length > 40) {
+        return null;
+    }
+    if (dec.words[0] === 1 && res.length !== 20 && res.length !== 32) {
+        return null;
+    }
+    return { version: dec.words[0], program: res };
+}
+
+
+function encodeBech32m(hrp, version, program) {
+    var ret = bech32m.encode(hrp, [version].concat(convertbits(program, 8, 5, true)));
+    if (decodeBech32m(hrp, ret) === null) {
+        return null;
+    }
+    return ret;
 }
 
 function isValidAddress(address, currency, networkType) {
-  if(!currency.segwitHrp) {
-    return false;
-  }
+    if (!currency.segwitHrp) {
+        return false;
+    }
 
-  var hrp=currency.segwitHrp[networkType];
-  if(!hrp) {
-    return false;
-  }
+    var hrp = currency.segwitHrp[networkType];
+    if (!hrp) {
+        return false;
+    }
 
-  var ret = decode(hrp, address);
+    var ret = decode(hrp, address);
+    if (ret === null) {
+        try {
+            var retm = decodeBech32m(hrp, address);
+        } catch (err) {
+            return false;
+        }
 
-  if (ret === null) {
-    return false;
-  }
+        if (retm === null) {
+            return false;
+        }
 
-  var recreate = encode(hrp, ret.version, ret.program);
-  return recreate === address.toLowerCase();
+        var recreate = encodeBech32m(hrp, retm.version, retm.program);
+        return recreate === address.toLowerCase();
+    }
+
+    var recreate = encode(hrp, ret.version, ret.program);
+    return recreate === address.toLowerCase();
 }
 
 module.exports = {
-  encode: encode,
-  decode: decode,
-  isValidAddress: isValidAddress,
+    encode: encode,
+    decode: decode,
+    isValidAddress: isValidAddress,
 };
 
-},{"./bech32":138}],144:[function(require,module,exports){
+},{"./bech32":138,"@scure/base":1}],144:[function(require,module,exports){
 (function (process,global){
 /**
  * [js-sha3]{@link https://github.com/emn178/js-sha3}
@@ -13693,7 +14156,7 @@ var f = function (s) {
 module.exports = methods;
 
 }).call(this,require('_process'),typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"_process":127}],145:[function(require,module,exports){
+},{"_process":128}],145:[function(require,module,exports){
 (function (Buffer){
 var jsSHA = require('jssha/src/sha256');
 var Blake256 = require('./blake256');
@@ -13824,1220 +14287,1499 @@ module.exports = {
 }
 
 }).call(this,require("buffer").Buffer)
-},{"./base32":136,"./base58":137,"./blake256":140,"./blake2b":141,"./sha3":144,"browserify-bignum":3,"buffer":4,"groestl-hash-js":31,"jssha/src/sha256":36}],146:[function(require,module,exports){
-var XRPValidator = require('./ripple_validator');
-var ETHValidator = require('./ethereum_validator');
-var BTCValidator = require('./bitcoin_validator');
-var ADAValidator = require('./ada_validator');
-var XMRValidator = require('./monero_validator');
-var NANOValidator = require('./nano_validator');
-var SCValidator = require('./siacoin_validator');
-var TRXValidator = require('./tron_validator');
-var NEMValidator = require('./nem_validator');
-var LSKValidator = require('./lisk_validator');
-var BCHValidator = require('./bch_validator');
-var XLMValidator = require('./stellar_validator');
-var BinanceValidator = require('./binance_validator');
-var EOSValidator = require('./eos_validator');
-var XTZValidator = require('./tezos_validator');
-var AEValidator = require('./ae_validator');
-var ARDRValidator = require('./ardr_validator');
-var ATOMValidator = require('./atom_validator');
-var HBARValidator = require('./hbar_validator');
-var ICXValidator = require('./icx_validator');
-var IOSTValidator = require('./iost_validator');
+},{"./base32":136,"./base58":137,"./blake256":140,"./blake2b":141,"./sha3":144,"browserify-bignum":4,"buffer":5,"groestl-hash-js":32,"jssha/src/sha256":37}],146:[function(require,module,exports){
+var XRPValidator = require("./ripple_validator");
+var ETHValidator = require("./ethereum_validator");
+var BTCValidator = require("./bitcoin_validator");
+var ADAValidator = require("./ada_validator");
+var XMRValidator = require("./monero_validator");
+var NANOValidator = require("./nano_validator");
+var SCValidator = require("./siacoin_validator");
+var TRXValidator = require("./tron_validator");
+var NEMValidator = require("./nem_validator");
+var LSKValidator = require("./lisk_validator");
+var BCHValidator = require("./bch_validator");
+var XLMValidator = require("./stellar_validator");
+var BinanceValidator = require("./binance_validator");
+var EOSValidator = require("./eos_validator");
+var XTZValidator = require("./tezos_validator");
+var AEValidator = require("./ae_validator");
+var ARDRValidator = require("./ardr_validator");
+var ATOMValidator = require("./atom_validator");
+var HBARValidator = require("./hbar_validator");
+var ICXValidator = require("./icx_validator");
+var IOSTValidator = require("./iost_validator");
 // var IOTAValidator = require('./iota_validator');
-var STEEMValidator = require('./steem_validator');
-var SYSValidator = require('./sys_validator');
-var ZILValidator = require('./zil_validator');
-var NXTValidator = require('./nxt_validator');
+var STEEMValidator = require("./steem_validator");
+var SYSValidator = require("./sys_validator");
+var ZILValidator = require("./zil_validator");
+var NXTValidator = require("./nxt_validator");
+var NEOValidator = require("./neo_validator");
+var SOLValidator = require("./sol_validator");
 
 // defines P2PKH, P2SH and bech32 address types for standard (prod) and testnet networks
 var CURRENCIES = [
     {
-        name: 'Bitcoin',
-        symbol: 'btc',
-        segwitHrp: { prod: 'bc', testnet: 'tb' },
-        addressTypes: { prod: ['00', '05'], testnet: ['6f', 'c4', '3c', '26'] },
+        name: "Bitcoin",
+        symbol: "btc",
+        segwitHrp: { prod: "bc", testnet: "tb" },
+        addressTypes: { prod: ["00", "05"], testnet: ["6f", "c4", "3c", "26"] },
         validator: BTCValidator,
-    }, {
-        name: 'BitcoinCash',
-        symbol: 'bch',
-        regexp: '^[qQpP]{1}[0-9a-zA-Z]{41}$',
-        addressTypes: { prod: ['00', '05'], testnet: ['6f', 'c4'] },
+    },
+    {
+        name: "BitcoinCash",
+        symbol: "bch",
+        regexp: "^[qQpP]{1}[0-9a-zA-Z]{41}$",
+        addressTypes: { prod: ["00", "05"], testnet: ["6f", "c4"] },
         validator: BCHValidator,
-    }, {
-        name: 'Bitcoin Diamond',
-        symbol: 'bcd',
+    },
+    {
+        name: "Bitcoin Diamond",
+        symbol: "bcd",
         validator: BTCValidator,
-        addressTypes: { prod: ['00'] }
-	}, {
-        name: 'Bitcoin SV',
-        symbol: 'bsv',
-        regexp: '^[qQ]{1}[0-9a-zA-Z]{41}$',
-        addressTypes: { prod: ['00', '05'], testnet: ['6f', 'c4'] },
+        addressTypes: { prod: ["00"] },
+    },
+    {
+        name: "Bitcoin SV",
+        symbol: "bsv",
+        regexp: "^[qQ]{1}[0-9a-zA-Z]{41}$",
+        addressTypes: { prod: ["00", "05"], testnet: ["6f", "c4"] },
         validator: BCHValidator,
-    }, {
-        name: 'LiteCoin',
-        symbol: 'ltc',
-        segwitHrp: { prod: 'ltc', testnet: 'tltc' },
-        addressTypes: { prod: ['30', '32'], testnet: ['6f', 'c4', '3a'] },
+    },
+    {
+        name: "LiteCoin",
+        symbol: "ltc",
+        segwitHrp: { prod: "ltc", testnet: "tltc" },
+        addressTypes: { prod: ["30", "32"], testnet: ["6f", "c4", "3a"] },
         validator: BTCValidator,
-    }, {
-        name: 'PeerCoin',
-        symbol: 'ppc',
-        addressTypes: { prod: ['37', '75'], testnet: ['6f', 'c4'] },
+    },
+    {
+        name: "PeerCoin",
+        symbol: "ppc",
+        addressTypes: { prod: ["37", "75"], testnet: ["6f", "c4"] },
         validator: BTCValidator,
-    }, {
-        name: 'DogeCoin',
-        symbol: 'doge',
-        addressTypes: { prod: ['1e', '16'], testnet: ['71', 'c4'] },
+    },
+    {
+        name: "DogeCoin",
+        symbol: "doge",
+        addressTypes: { prod: ["1e", "16"], testnet: ["71", "c4"] },
         validator: BTCValidator,
-    }, {
-        name: 'BeaverCoin',
-        symbol: 'bvc',
-        addressTypes: { prod: ['19', '05'], testnet: ['6f', 'c4'] },
+    },
+    {
+        name: "BeaverCoin",
+        symbol: "bvc",
+        addressTypes: { prod: ["19", "05"], testnet: ["6f", "c4"] },
         validator: BTCValidator,
-    }, {
-        name: 'FreiCoin',
-        symbol: 'frc',
-        addressTypes: { prod: ['00', '05'], testnet: ['6f', 'c4'] },
+    },
+    {
+        name: "FreiCoin",
+        symbol: "frc",
+        addressTypes: { prod: ["00", "05"], testnet: ["6f", "c4"] },
         validator: BTCValidator,
-    }, {
-        name: 'ProtoShares',
-        symbol: 'pts',
-        addressTypes: { prod: ['38', '05'], testnet: ['6f', 'c4'] },
+    },
+    {
+        name: "ProtoShares",
+        symbol: "pts",
+        addressTypes: { prod: ["38", "05"], testnet: ["6f", "c4"] },
         validator: BTCValidator,
-    }, {
-        name: 'MegaCoin',
-        symbol: 'mec',
-        addressTypes: { prod: ['32', '05'], testnet: ['6f', 'c4'] },
+    },
+    {
+        name: "MegaCoin",
+        symbol: "mec",
+        addressTypes: { prod: ["32", "05"], testnet: ["6f", "c4"] },
         validator: BTCValidator,
-    }, {
-        name: 'PrimeCoin',
-        symbol: 'xpm',
-        addressTypes: { prod: ['17', '53'], testnet: ['6f', 'c4'] },
+    },
+    {
+        name: "PrimeCoin",
+        symbol: "xpm",
+        addressTypes: { prod: ["17", "53"], testnet: ["6f", "c4"] },
         validator: BTCValidator,
-    }, {
-        name: 'AuroraCoin',
-        symbol: 'aur',
-        addressTypes: { prod: ['17', '05'], testnet: ['6f', 'c4'] },
+    },
+    {
+        name: "AuroraCoin",
+        symbol: "aur",
+        addressTypes: { prod: ["17", "05"], testnet: ["6f", "c4"] },
         validator: BTCValidator,
-    }, {
-        name: 'NameCoin',
-        symbol: 'nmc',
-        addressTypes: { prod: ['34'], testnet: [] },
+    },
+    {
+        name: "NameCoin",
+        symbol: "nmc",
+        addressTypes: { prod: ["34"], testnet: [] },
         validator: BTCValidator,
-    }, {
-        name: 'NXT',
-        symbol: 'nxt',
+    },
+    {
+        name: "NXT",
+        symbol: "nxt",
         validator: NXTValidator,
-    }, {
-        name: 'BioCoin',
-        symbol: 'bio',
-        addressTypes: { prod: ['19', '14'], testnet: ['6f', 'c4'] },
+    },
+    {
+        name: "BioCoin",
+        symbol: "bio",
+        addressTypes: { prod: ["19", "14"], testnet: ["6f", "c4"] },
         validator: BTCValidator,
-    }, {
-        name: 'GarliCoin',
-        symbol: 'grlc',
-        addressTypes: { prod: ['26', '05'], testnet: ['6f', 'c4'] },
+    },
+    {
+        name: "GarliCoin",
+        symbol: "grlc",
+        addressTypes: { prod: ["26", "05"], testnet: ["6f", "c4"] },
         validator: BTCValidator,
-    }, {
-        name: 'VertCoin',
-        symbol: 'vtc',
-        segwitHrp: { prod: 'vtc', testnet: 'tvtc' },
-        addressTypes: { prod: ['47', '05'], testnet: ['4a', 'c4', '6f'] },
+    },
+    {
+        name: "VertCoin",
+        symbol: "vtc",
+        segwitHrp: { prod: "vtc", testnet: "tvtc" },
+        addressTypes: { prod: ["47", "05"], testnet: ["4a", "c4", "6f"] },
         validator: BTCValidator,
-    }, {
-        name: 'VeChain',
-        symbol: 'ven',
+    },
+    {
+        name: "VeChain",
+        symbol: "ven",
         validator: ETHValidator,
-    }, {
-        name: 'VeChain Mainnet',
-        symbol: 'vet',
+    },
+    {
+        name: "VeChain Mainnet",
+        symbol: "vet",
         validator: ETHValidator,
-    }, {
-        name: 'BitcoinGold',
-        symbol: 'btg',
-        segwitHrp: { prod: 'btg', testnet: 'tbtg' },
-        addressTypes: { prod: ['26', '17'], testnet: ['6f', 'c4'] },
+    },
+    {
+        name: "BitcoinGold",
+        symbol: "btg",
+        segwitHrp: { prod: "btg", testnet: "tbtg" },
+        addressTypes: { prod: ["26", "17"], testnet: ["6f", "c4"] },
         validator: BTCValidator,
-    }, {
-        name: 'Komodo',
-        symbol: 'kmd',
-        addressTypes: { prod: ['3c', '55'], testnet: ['0', '5'] },
+    },
+    {
+        name: "Komodo",
+        symbol: "kmd",
+        addressTypes: { prod: ["3c", "55"], testnet: ["0", "5"] },
         validator: BTCValidator,
-    }, {
-        name: 'BitcoinZ',
-        symbol: 'btcz',
+    },
+    {
+        name: "BitcoinZ",
+        symbol: "btcz",
         expectedLength: 26,
-        addressTypes: { prod: ['1cb8', '1cbd'], testnet: ['1d25', '1cba'] },
+        addressTypes: { prod: ["1cb8", "1cbd"], testnet: ["1d25", "1cba"] },
         validator: BTCValidator,
-    }, {
-        name: 'BitcoinPrivate',
-        symbol: 'btcp',
+    },
+    {
+        name: "BitcoinPrivate",
+        symbol: "btcp",
         expectedLength: 26,
-        addressTypes: { prod: ['1325', '13af'], testnet: ['1957', '19e0'] },
+        addressTypes: { prod: ["1325", "13af"], testnet: ["1957", "19e0"] },
         validator: BTCValidator,
-    }, {
-        name: 'Hush',
-        symbol: 'hush',
+    },
+    {
+        name: "Hush",
+        symbol: "hush",
         expectedLength: 26,
-        addressTypes: { prod: ['1cb8', '1cbd'], testnet: ['1d25', '1cba'] },
+        addressTypes: { prod: ["1cb8", "1cbd"], testnet: ["1d25", "1cba"] },
         validator: BTCValidator,
-    }, {
-        name: 'SnowGem',
-        symbol: 'sng',
+    },
+    {
+        name: "SnowGem",
+        symbol: "sng",
         expectedLength: 26,
-        addressTypes: { prod: ['1c28', '1c2d'], testnet: ['1d25', '1cba'] },
+        addressTypes: { prod: ["1c28", "1c2d"], testnet: ["1d25", "1cba"] },
         validator: BTCValidator,
-    }, {
-        name: 'ZCash',
-        symbol: 'zec',
+    },
+    {
+        name: "ZCash",
+        symbol: "zec",
         expectedLength: 26,
-        addressTypes: { prod: ['1cb8', '1cbd'], testnet: ['1d25', '1cba'] },
+        addressTypes: { prod: ["1cb8", "1cbd"], testnet: ["1d25", "1cba"] },
         validator: BTCValidator,
-    }, {
-        name: 'ZClassic',
-        symbol: 'zcl',
+    },
+    {
+        name: "ZClassic",
+        symbol: "zcl",
         expectedLength: 26,
-        addressTypes: { prod: ['1cb8', '1cbd'], testnet: ['1d25', '1cba'] },
+        addressTypes: { prod: ["1cb8", "1cbd"], testnet: ["1d25", "1cba"] },
         validator: BTCValidator,
-    }, {
-        name: 'ZenCash',
-        symbol: 'zen',
+    },
+    {
+        name: "ZenCash",
+        symbol: "zen",
         expectedLength: 26,
-        addressTypes: { prod: ['2089', '2096'], testnet: ['2092', '2098'] },
+        addressTypes: { prod: ["2089", "2096"], testnet: ["2092", "2098"] },
         validator: BTCValidator,
-    }, {
-        name: 'VoteCoin',
-        symbol: 'vot',
+    },
+    {
+        name: "VoteCoin",
+        symbol: "vot",
         expectedLength: 26,
-        addressTypes: { prod: ['1cb8', '1cbd'], testnet: ['1d25', '1cba'] },
+        addressTypes: { prod: ["1cb8", "1cbd"], testnet: ["1d25", "1cba"] },
         validator: BTCValidator,
-    }, {
-        name: 'Decred',
-        symbol: 'dcr',
-        addressTypes: { prod: ['073f', '071a'], testnet: ['0f21', '0efc'] },
-        hashFunction: 'blake256',
+    },
+    {
+        name: "Decred",
+        symbol: "dcr",
+        addressTypes: { prod: ["073f", "071a"], testnet: ["0f21", "0efc"] },
+        hashFunction: "blake256",
         expectedLength: 26,
         validator: BTCValidator,
-    }, {
-        name: 'GameCredits',
-        symbol: 'game',
-        segwitHrp: { prod: 'game',  prod: 'tgame' },
-        addressTypes: { prod: ['26', '3e'], testnet: ['6f', '3a'] },
+    },
+    {
+        name: "GameCredits",
+        symbol: "game",
+        segwitHrp: { prod: "game", prod: "tgame" },
+        addressTypes: { prod: ["26", "3e"], testnet: ["6f", "3a"] },
         validator: BTCValidator,
-    }, {
-        name: 'PIVX',
-        symbol: 'pivx',
-        addressTypes: { prod: ['1e', '0d'], testnet: [] },
+    },
+    {
+        name: "PIVX",
+        symbol: "pivx",
+        addressTypes: { prod: ["1e", "0d"], testnet: [] },
         validator: BTCValidator,
-    }, {
-        name: 'SolarCoin',
-        symbol: 'slr',
-        addressTypes: { prod: ['12', '05'], testnet: [] },
+    },
+    {
+        name: "SolarCoin",
+        symbol: "slr",
+        addressTypes: { prod: ["12", "05"], testnet: [] },
         validator: BTCValidator,
-    }, {
-        name: 'MonaCoin',
-        symbol: 'mona',
-        segwitHrp: { prod: 'mona',  prod: 'tmona' },
-        addressTypes: { prod: ['32', '37'], testnet: ['6f', '75'] },
+    },
+    {
+        name: "MonaCoin",
+        symbol: "mona",
+        segwitHrp: { prod: "mona", prod: "tmona" },
+        addressTypes: { prod: ["32", "37"], testnet: ["6f", "75"] },
         validator: BTCValidator,
-    }, {
-        name: 'DigiByte',
-        symbol: 'dgb',
-        segwitHrp: { prod: 'dgb' },
-        addressTypes: { prod: ['1e', '3f'], testnet: [] },
+    },
+    {
+        name: "DigiByte",
+        symbol: "dgb",
+        segwitHrp: { prod: "dgb" },
+        addressTypes: { prod: ["1e", "3f"], testnet: [] },
         validator: BTCValidator,
-    }, {
-        name: 'Tether',
-        symbol: 'usdt',
-        addressTypes: { prod: ['00', '05'], testnet: ['6f', 'c4'] },
+    },
+    {
+        name: "Tether",
+        symbol: "usdt",
+        addressTypes: { prod: ["00", "05"], testnet: ["6f", "c4"] },
         validator: BTCValidator,
-    }, {
-        name: 'Ripple',
-        symbol: 'xrp',
+    },
+    {
+        name: "Ripple",
+        symbol: "xrp",
         validator: XRPValidator,
-    }, {
-        name: 'Dash',
-        symbol: 'dash',
-        addressTypes: { prod: ['4c', '10'], testnet: ['8c', '13'] },
+    },
+    {
+        name: "Dash",
+        symbol: "dash",
+        addressTypes: { prod: ["4c", "10"], testnet: ["8c", "13"] },
         validator: BTCValidator,
-    }, {
-        name: 'Neo',
-        symbol: 'neo',
-        addressTypes: { prod: ['17'], testnet: [] },
+    },
+    {
+        name: "Neo",
+        symbol: "neo",
+        addressTypes: { prod: ["17"], testnet: [] },
+        validator: NEOValidator,
+    },
+    {
+        name: "NeoGas",
+        symbol: "gas",
+        addressTypes: { prod: ["17"], testnet: [] },
+        validator: NEOValidator,
+    },
+    {
+        name: "Qtum",
+        symbol: "qtum",
+        segwitHrp: { prod: "qc", prod: "tq" },
+        addressTypes: { prod: ["3a", "32"], testnet: ["78", "6e"] },
         validator: BTCValidator,
-    }, {
-        name: 'NeoGas',
-        symbol: 'gas',
-        addressTypes: { prod: ['17'], testnet: [] },
-        validator: BTCValidator,
-    }, {
-        name: 'Qtum',
-        symbol: 'qtum',
-        segwitHrp: { prod: 'qc',  prod: 'tq' },
-        addressTypes: { prod: ['3a', '32'], testnet: ['78', '6e'] },
-        validator: BTCValidator,
-    }, {
-        name: 'Waves',
-        symbol: 'waves',
-        addressTypes: { prod: ['0157'], testnet: ['0154'] },
+    },
+    {
+        name: "Waves",
+        symbol: "waves",
+        addressTypes: { prod: ["0157"], testnet: ["0154"] },
         expectedLength: 26,
-        hashFunction: 'blake256keccak256',
+        hashFunction: "blake256keccak256",
         regex: /^[a-zA-Z0-9]{35}$/,
         validator: BTCValidator,
-    }, {
-        name: 'Ontology',
-        symbol: 'ont',
+    },
+    {
+        name: "Ontology",
+        symbol: "ont",
         validator: BTCValidator,
-        addressTypes: { prod: ['17', '41'] }
-    }, {
-        name: 'Ravencoin',
-        symbol: 'rvn',
+        addressTypes: { prod: ["17", "41"] },
+    },
+    {
+        name: "Ravencoin",
+        symbol: "rvn",
         validator: BTCValidator,
-        addressTypes: { prod: ['3c'] }
-    }, {
-        name: 'Groestlcoin',
-        symbol: 'grs',
-        addressTypes: { prod: ['24', '05'], testnet: ['6f', 'c4'] },
-        segwitHrp: { prod: 'grs', testnet: 'tgrs' },
-        hashFunction: 'groestl512x2',
-        validator: BTCValidator
-    }, {
-        name: 'Ethereum',
-        symbol: 'eth',
+        addressTypes: { prod: ["3c"] },
+    },
+    {
+        name: "Groestlcoin",
+        symbol: "grs",
+        addressTypes: { prod: ["24", "05"], testnet: ["6f", "c4"] },
+        segwitHrp: { prod: "grs", testnet: "tgrs" },
+        hashFunction: "groestl512x2",
+        validator: BTCValidator,
+    },
+    {
+        name: "Ethereum",
+        symbol: "eth",
         validator: ETHValidator,
-    }, {
-        name: 'EtherZero',
-        symbol: 'etz',
+    },
+    {
+        name: "EtherZero",
+        symbol: "etz",
         validator: ETHValidator,
-    }, {
-        name: 'EthereumClassic',
-        symbol: 'etc',
+    },
+    {
+        name: "EthereumClassic",
+        symbol: "etc",
         validator: ETHValidator,
-    }, {
-        name: 'Callisto',
-        symbol: 'clo',
+    },
+    {
+        name: "Callisto",
+        symbol: "clo",
         validator: ETHValidator,
-    }, {
-        name: 'Bankex',
-        symbol: 'bkx',
+    },
+    {
+        name: "Bankex",
+        symbol: "bkx",
         validator: ETHValidator,
-    }, {
-        name: 'Cardano',
-        symbol: 'ada',
-        segwitHrp: { prod: 'addr' },
+    },
+    {
+        name: "Cardano",
+        symbol: "ada",
+        segwitHrp: { prod: "addr" },
         validator: ADAValidator,
-    }, {
-        name: 'Monero',
-        symbol: 'xmr',
-        addressTypes: { prod: ['18'], testnet: ['53'] },
-        iAddressTypes: { prod: ['19'], testnet: ['54'] },
+    },
+    {
+        name: "Monero",
+        symbol: "xmr",
+        addressTypes: { prod: ["18"], testnet: ["53"] },
+        iAddressTypes: { prod: ["19"], testnet: ["54"] },
         validator: XMRValidator,
-    }, {
-        name: 'Aragon',
-        symbol: 'ant',
+    },
+    {
+        name: "Aragon",
+        symbol: "ant",
         validator: ETHValidator,
-    }, {
-        name: 'Ardor',
-        symbol: 'ardr',
+    },
+    {
+        name: "Ardor",
+        symbol: "ardr",
         validator: ARDRValidator,
-    }, {
-        name: 'Basic Attention Token',
-        symbol: 'bat',
+    },
+    {
+        name: "Basic Attention Token",
+        symbol: "bat",
         validator: ETHValidator,
-    }, {
-        name: 'Bancor',
-        symbol: 'bnt',
+    },
+    {
+        name: "Bancor",
+        symbol: "bnt",
         validator: ETHValidator,
-    }, {
-        name: 'Civic',
-        symbol: 'cvc',
+    },
+    {
+        name: "Civic",
+        symbol: "cvc",
         validator: ETHValidator,
-    }, {
-        name: 'Own', // Rebranded from Chainium
-        symbol: 'chx',
+    },
+    {
+        name: "Own", // Rebranded from Chainium
+        symbol: "chx",
         validator: ETHValidator,
-    }, {
-        name: 'District0x',
-        symbol: 'dnt',
+    },
+    {
+        name: "District0x",
+        symbol: "dnt",
         validator: ETHValidator,
-    }, {
-        name: 'Gnosis',
-        symbol: 'gno',
+    },
+    {
+        name: "Gnosis",
+        symbol: "gno",
         validator: ETHValidator,
-    }, {
-        name: 'Golem',
-        symbol: 'gnt',
+    },
+    {
+        name: "Golem",
+        symbol: "gnt",
         validator: ETHValidator,
-    }, {
-        name: 'Matchpool',
-        symbol: 'gup',
+    },
+    {
+        name: "Matchpool",
+        symbol: "gup",
         validator: ETHValidator,
-    }, {
-        name: 'Melon',
-        symbol: 'mln',
+    },
+    {
+        name: "Melon",
+        symbol: "mln",
         validator: ETHValidator,
-    }, {
-        name: 'Numeraire',
-        symbol: 'nmr',
+    },
+    {
+        name: "Numeraire",
+        symbol: "nmr",
         validator: ETHValidator,
-    }, {
-        name: 'OmiseGO',
-        symbol: 'omg',
+    },
+    {
+        name: "OmiseGO",
+        symbol: "omg",
         validator: ETHValidator,
-    }, {
-        name: 'TenX',
-        symbol: 'pay',
+    },
+    {
+        name: "TenX",
+        symbol: "pay",
         validator: ETHValidator,
-    }, {
-        name: 'Ripio Credit Network',
-        symbol: 'rcn',
+    },
+    {
+        name: "Ripio Credit Network",
+        symbol: "rcn",
         validator: ETHValidator,
-    }, {
-        name: 'Augur',
-        symbol: 'rep',
+    },
+    {
+        name: "Augur",
+        symbol: "rep",
         validator: ETHValidator,
-    }, {
-        name: 'iExec RLC',
-        symbol: 'rlc',
+    },
+    {
+        name: "iExec RLC",
+        symbol: "rlc",
         validator: ETHValidator,
-    }, {
-        name: 'Salt',
-        symbol: 'salt',
+    },
+    {
+        name: "Salt",
+        symbol: "salt",
         validator: ETHValidator,
-    }, {
-        name: 'Status',
-        symbol: 'snt',
+    },
+    {
+        name: "Status",
+        symbol: "snt",
         validator: ETHValidator,
-    }, {
-        name: 'Storj',
-        symbol: 'storj',
+    },
+    {
+        name: "Storj",
+        symbol: "storj",
         validator: ETHValidator,
-    }, {
-        name: 'STEEM',
-        symbol: 'steem',
-        validator: STEEMValidator
-    }, {
-        name: 'Stratis',
-        symbol: 'strat',
+    },
+    {
+        name: "STEEM",
+        symbol: "steem",
+        validator: STEEMValidator,
+    },
+    {
+        name: "Stratis",
+        symbol: "strat",
         validator: BTCValidator,
-        addressTypes: { prod: ['3f'] }
-    }, {
-        name: 'Syscoin',
-        symbol: 'sys',
-        addressTypes: { prod: ['3f'] },
-        validator: SYSValidator
-    }, {
-        name: 'Swarm City',
-        symbol: 'swt',
+        addressTypes: { prod: ["3f"] },
+    },
+    {
+        name: "Syscoin",
+        symbol: "sys",
+        addressTypes: { prod: ["3f"] },
+        validator: SYSValidator,
+    },
+    {
+        name: "Swarm City",
+        symbol: "swt",
         validator: ETHValidator,
-    }, {
-        name: 'TrueUSD',
-        symbol: 'tusd',
+    },
+    {
+        name: "TrueUSD",
+        symbol: "tusd",
         validator: ETHValidator,
-    }, {
-        name: 'Wings',
-        symbol: 'wings',
+    },
+    {
+        name: "Wings",
+        symbol: "wings",
         validator: ETHValidator,
-    }, {
-        name: '0x',
-        symbol: 'zrx',
+    },
+    {
+        name: "0x",
+        symbol: "zrx",
         validator: ETHValidator,
-    }, {
-        name: 'Expanse',
-        symbol: 'exp',
+    },
+    {
+        name: "Expanse",
+        symbol: "exp",
         validator: ETHValidator,
-    }, {
-        name: 'Viberate',
-        symbol: 'vib',
+    },
+    {
+        name: "Viberate",
+        symbol: "vib",
         validator: ETHValidator,
-    }, {
-        name: 'Odyssey',
-        symbol: 'ocn',
+    },
+    {
+        name: "Odyssey",
+        symbol: "ocn",
         validator: ETHValidator,
-    }, {
-        name: 'Polymath',
-        symbol: 'poly',
+    },
+    {
+        name: "Polymath",
+        symbol: "poly",
         validator: ETHValidator,
-    }, {
-        name: 'Storm',
-        symbol: 'storm',
+    },
+    {
+        name: "Storm",
+        symbol: "storm",
         validator: ETHValidator,
-    }, {
-        name: 'FirstBlood',
-        symbol: '1st',
+    },
+    {
+        name: "FirstBlood",
+        symbol: "1st",
         validator: ETHValidator,
-    }, {
-        name: 'Arcblock',
-        symbol: 'abt',
+    },
+    {
+        name: "Arcblock",
+        symbol: "abt",
         validator: ETHValidator,
-    }, {
-        name: 'Abyss Token',
-        symbol: 'abyss',
+    },
+    {
+        name: "Abyss Token",
+        symbol: "abyss",
         validator: ETHValidator,
-    }, {
-        name: 'adToken',
-        symbol: 'adt',
+    },
+    {
+        name: "adToken",
+        symbol: "adt",
         validator: ETHValidator,
-    }, {
-        name: 'AdEx',
-        symbol: 'adx',
+    },
+    {
+        name: "AdEx",
+        symbol: "adx",
         validator: ETHValidator,
-    }, {
-        name: 'SingularityNET',
-        symbol: 'agi',
+    },
+    {
+        name: "SingularityNET",
+        symbol: "agi",
         validator: ETHValidator,
-    }, {
-        name: 'Ambrosus',
-        symbol: 'amb',
+    },
+    {
+        name: "Ambrosus",
+        symbol: "amb",
         validator: ETHValidator,
-    }, {
-        name: 'Ankr',
-        symbol: 'ankr',
+    },
+    {
+        name: "Ankr",
+        symbol: "ankr",
         validator: ETHValidator,
-    }, {
-        name: 'AppCoins',
-        symbol: 'appc',
+    },
+    {
+        name: "AppCoins",
+        symbol: "appc",
         validator: ETHValidator,
-    }, {
-        name: 'Cosmos',
-        symbol: 'atom',
+    },
+    {
+        name: "Cosmos",
+        symbol: "atom",
         validator: ATOMValidator,
-    }, {
-        name: 'Aeron',
-        symbol: 'arn',
+    },
+    {
+        name: "Aeron",
+        symbol: "arn",
         validator: ETHValidator,
-    }, {
-        name: 'Aeternity',
-        symbol: 'ae',
+    },
+    {
+        name: "Aeternity",
+        symbol: "ae",
         validator: AEValidator,
-    }, {
-        name: 'ATLANT',
-        symbol: 'atl',
+    },
+    {
+        name: "ATLANT",
+        symbol: "atl",
         validator: ETHValidator,
-    }, {
-        name: 'aXpire',
-        symbol: 'axpr',
+    },
+    {
+        name: "aXpire",
+        symbol: "axpr",
         validator: ETHValidator,
-    }, {
-        name: 'Band Protocol',
-        symbol: 'band',
+    },
+    {
+        name: "Band Protocol",
+        symbol: "band",
         validator: ETHValidator,
-    }, {
-        name: 'Blockmason Credit Protocol',
-        symbol: 'bcpt',
+    },
+    {
+        name: "Blockmason Credit Protocol",
+        symbol: "bcpt",
         validator: ETHValidator,
-    }, {
-        name: 'BitDegree',
-        symbol: 'bdg',
+    },
+    {
+        name: "BitDegree",
+        symbol: "bdg",
         validator: ETHValidator,
-    }, {
-        name: 'BetterBetting',
-        symbol: 'betr',
+    },
+    {
+        name: "BetterBetting",
+        symbol: "betr",
         validator: ETHValidator,
-    }, {
-        name: 'Bluzelle',
-        symbol: 'blz',
+    },
+    {
+        name: "Bluzelle",
+        symbol: "blz",
         validator: ETHValidator,
-    }, {
-        name: 'Bread',
-        symbol: 'brd',
+    },
+    {
+        name: "Bread",
+        symbol: "brd",
         validator: ETHValidator,
-    }, {
-        name: 'Blocktrade Token',
-        symbol: 'btt',
+    },
+    {
+        name: "Blocktrade Token",
+        symbol: "btt",
         validator: ETHValidator,
-    }, {
-        name: 'Binance USD',
-        symbol: 'busd',
+    },
+    {
+        name: "Binance USD",
+        symbol: "busd",
         validator: ETHValidator,
-    }, {
-        name: 'CryptoBossCoin',
-        symbol: 'cbc',
+    },
+    {
+        name: "CryptoBossCoin",
+        symbol: "cbc",
         validator: ETHValidator,
-    }, {
-        name: 'Blox',
-        symbol: 'cdt',
+    },
+    {
+        name: "Blox",
+        symbol: "cdt",
         validator: ETHValidator,
-    }, {
-        name: 'Celer Network',
-        symbol: 'celr',
+    },
+    {
+        name: "Celer Network",
+        symbol: "celr",
         validator: ETHValidator,
-    }, {
-        name: 'Chiliz',
-        symbol: 'chz',
+    },
+    {
+        name: "Chiliz",
+        symbol: "chz",
         validator: ETHValidator,
-    }, {
-        name: 'Coinlancer',
-        symbol: 'cl',
+    },
+    {
+        name: "Coinlancer",
+        symbol: "cl",
         validator: ETHValidator,
-    }, {
-        name: 'Cindicator',
-        symbol: 'cnd',
+    },
+    {
+        name: "Cindicator",
+        symbol: "cnd",
         validator: ETHValidator,
-    }, {
-        name: 'Cocos-BCX',
-        symbol: 'cocos',
+    },
+    {
+        name: "Cocos-BCX",
+        symbol: "cocos",
         validator: ETHValidator,
-    }, {
-        name: 'COS',
-        symbol: 'cos',
+    },
+    {
+        name: "COS",
+        symbol: "cos",
         validator: ETHValidator,
-    }, {
-        name: 'Cosmo Coin',
-        symbol: 'cosm',
+    },
+    {
+        name: "Cosmo Coin",
+        symbol: "cosm",
         validator: ETHValidator,
-    }, {
-        name: 'Covesting',
-        symbol: 'cov',
+    },
+    {
+        name: "Covesting",
+        symbol: "cov",
         validator: ETHValidator,
-    }, {
-        name: 'Crypterium',
-        symbol: 'crpt',
+    },
+    {
+        name: "Crypterium",
+        symbol: "crpt",
         validator: ETHValidator,
-    }, {
-        name: 'Daneel',
-        symbol: 'dan',
+    },
+    {
+        name: "Daneel",
+        symbol: "dan",
         validator: ETHValidator,
-    }, {
-        name: 'Streamr DATAcoin',
-        symbol: 'data',
+    },
+    {
+        name: "Streamr DATAcoin",
+        symbol: "data",
         validator: ETHValidator,
-    }, {
-        name: 'Dentacoin',
-        symbol: 'dcn',
+    },
+    {
+        name: "Dentacoin",
+        symbol: "dcn",
         validator: ETHValidator,
-    }, {
-        name: 'Dent',
-        symbol: 'dent',
+    },
+    {
+        name: "Dent",
+        symbol: "dent",
         validator: ETHValidator,
-    }, {
-        name: 'DigixDAO',
-        symbol: 'dgd',
+    },
+    {
+        name: "DigixDAO",
+        symbol: "dgd",
         validator: ETHValidator,
-    }, {
-        name: 'Digitex Futures',
-        symbol: 'dgtx',
+    },
+    {
+        name: "Digitex Futures",
+        symbol: "dgtx",
         validator: ETHValidator,
-    }, {
-        name: 'Agrello',
-        symbol: 'dlt',
+    },
+    {
+        name: "Agrello",
+        symbol: "dlt",
         validator: ETHValidator,
-    }, {
-        name: 'Dock',
-        symbol: 'dock',
+    },
+    {
+        name: "Dock",
+        symbol: "dock",
         validator: ETHValidator,
-    }, {
-        name: 'DomRaider',
-        symbol: 'drt',
+    },
+    {
+        name: "DomRaider",
+        symbol: "drt",
         validator: ETHValidator,
-    }, {
-        name: 'Dusk Network',
-        symbol: 'dusk',
+    },
+    {
+        name: "Dusk Network",
+        symbol: "dusk",
         validator: ETHValidator,
-    }, {
-        name: 'Edgeless',
-        symbol: 'edg',
+    },
+    {
+        name: "Edgeless",
+        symbol: "edg",
         validator: ETHValidator,
-    }, {
-        name: 'Eidoo',
-        symbol: 'edo',
+    },
+    {
+        name: "Eidoo",
+        symbol: "edo",
         validator: ETHValidator,
-    }, {
-        name: 'Electrify.Asia',
-        symbol: 'elec',
+    },
+    {
+        name: "Electrify.Asia",
+        symbol: "elec",
         validator: ETHValidator,
-    }, {
-        name: 'aelf',
-        symbol: 'elf',
+    },
+    {
+        name: "aelf",
+        symbol: "elf",
         validator: ETHValidator,
-    }, {
-        name: 'Enigma',
-        symbol: 'eng',
+    },
+    {
+        name: "Enigma",
+        symbol: "eng",
         validator: ETHValidator,
-    }, {
-        name: 'STASIS EURO',
-        symbol: 'eurs',
+    },
+    {
+        name: "STASIS EURO",
+        symbol: "eurs",
         validator: ETHValidator,
-    }, {
-        name: 'Everex',
-        symbol: 'evx',
+    },
+    {
+        name: "Everex",
+        symbol: "evx",
         validator: ETHValidator,
-    }, {
-        name: 'FirmaChain',
-        symbol: 'fct',
+    },
+    {
+        name: "FirmaChain",
+        symbol: "fct",
         validator: ETHValidator,
-    }, {
-        name: 'Fetch.ai',
-        symbol: 'fet',
+    },
+    {
+        name: "Fetch.ai",
+        symbol: "fet",
         validator: ETHValidator,
-    }, {
-        name: 'Fortuna',
-        symbol: 'fota',
+    },
+    {
+        name: "Fortuna",
+        symbol: "fota",
         validator: ETHValidator,
-    }, {
-        name: 'Fantom',
-        symbol: 'ftm',
+    },
+    {
+        name: "Fantom",
+        symbol: "ftm",
         validator: ETHValidator,
-    }, {
-        name: 'Etherparty',
-        symbol: 'fuel',
+    },
+    {
+        name: "Etherparty",
+        symbol: "fuel",
         validator: ETHValidator,
-    }, {
-        name: 'Gifto',
-        symbol: 'gto',
+    },
+    {
+        name: "Gifto",
+        symbol: "gto",
         validator: ETHValidator,
-    }, {
-        name: 'Gemini Dollar',
-        symbol: 'gusd',
+    },
+    {
+        name: "Gemini Dollar",
+        symbol: "gusd",
         validator: ETHValidator,
-    }, {
-        name: 'Genesis Vision',
-        symbol: 'gvt',
+    },
+    {
+        name: "Genesis Vision",
+        symbol: "gvt",
         validator: ETHValidator,
-    }, {
-        name: 'Humaniq',
-        symbol: 'hmq',
+    },
+    {
+        name: "Humaniq",
+        symbol: "hmq",
         validator: ETHValidator,
-    }, {
-        name: 'Holo',
-        symbol: 'hot',
+    },
+    {
+        name: "Holo",
+        symbol: "hot",
         validator: ETHValidator,
-    }, {
-        name: 'HOQU',
-        symbol: 'hqx',
+    },
+    {
+        name: "HOQU",
+        symbol: "hqx",
         validator: ETHValidator,
-    }, {
-        name: 'Huobi Token',
-        symbol: 'ht',
+    },
+    {
+        name: "Huobi Token",
+        symbol: "ht",
         validator: ETHValidator,
-    }, {
-        name: 'ICON',
-        symbol: 'icx',
+    },
+    {
+        name: "ICON",
+        symbol: "icx",
         validator: ICXValidator,
-    }, {
-        name: 'Internet of Services',
-        symbol: 'IOST',
+    },
+    {
+        name: "Internet of Services",
+        symbol: "IOST",
         validator: IOSTValidator,
-    // disable iota validation for now
-    // }, {
-    //     name: 'Iota',
-    //     symbol: 'iota',
-    //     validator: IOTAValidator,
-    }, {
-        name: 'IHT Real Estate Protocol',
-        symbol: 'iht',
-        validator: ETHValidator,
-    }, {
-        name: 'Insolar',
-        symbol: 'ins',
-        validator: ETHValidator,
-    }, {
-        name: 'IoTeX',
-        symbol: 'iotx',
-        validator: ETHValidator,
-    }, {
-        name: 'BitKan',
-        symbol: 'kan',
-        validator: ETHValidator,
-    }, {
-        name: 'Kcash',
-        symbol: 'kcash',
-        validator: ETHValidator,
-    }, {
-        name: 'KEY',
-        symbol: 'key',
-        validator: ETHValidator,
-    }, {
-        name: 'KickToken',
-        symbol: 'kick',
-        validator: ETHValidator,
-    }, {
-        name: 'Kyber Network',
-        symbol: 'knc',
-        validator: ETHValidator,
-    }, {
-        name: 'Lambda',
-        symbol: 'lamb',
-        validator: ETHValidator,
-    }, {
-        name: 'Aave',
-        symbol: 'lend',
-        validator: ETHValidator,
-    }, {
-        name: 'LinkEye',
-        symbol: 'let',
-        validator: ETHValidator,
-    }, {
-        name: 'LIFE',
-        symbol: 'life',
-        validator: ETHValidator,
-    }, {
-        name: 'LockTrip',
-        symbol: 'loc',
-        validator: ETHValidator,
-    }, {
-        name: 'Loopring',
-        symbol: 'lrc',
-        validator: ETHValidator,
-    }, {
-        name: 'Lunyr',
-        symbol: 'lun',
-        validator: ETHValidator,
-    }, {
-        name: 'Decentraland',
-        symbol: 'mana',
-        validator: ETHValidator,
-    }, {
-        name: 'Matic Network',
-        symbol: 'matic',
-        validator: ETHValidator,
-    }, {
-        name: 'Avalanche',
-        symbol: 'avax',
-        validator: ETHValidator,
-    }, {
-        name: 'MCO',
-        symbol: 'mco',
-        validator: ETHValidator,
-    }, {
-        name: 'Moeda Loyalty Points',
-        symbol: 'mda',
-        validator: ETHValidator,
-    }, {
-        name: 'Measurable Data Token',
-        symbol: 'mdt',
-        validator: ETHValidator,
-    }, {
-        name: 'Mainframe',
-        symbol: 'mft',
-        validator: ETHValidator,
-    }, {
-        name: 'Mithril',
-        symbol: 'mith',
-        validator: ETHValidator,
-    }, {
-        name: 'Molecular Future',
-        symbol: 'mof',
-        validator: ETHValidator,
-    }, {
-        name: 'Monetha',
-        symbol: 'mth',
-        validator: ETHValidator,
-    }, {
-        name: 'Mysterium',
-        symbol: 'myst',
-        validator: ETHValidator,
-    }, {
-        name: 'Nucleus Vision',
-        symbol: 'ncash',
-        validator: ETHValidator,
-    }, {
-        name: 'Nexo',
-        symbol: 'nexo',
-        validator: ETHValidator,
-    }, {
-        name: 'NAGA',
-        symbol: 'ngc',
-        validator: ETHValidator,
-    }, {
-        name: 'Noah Coin',
-        symbol: 'noah',
-        validator: ETHValidator,
-    }, {
-        name: 'Pundi X',
-        symbol: 'npxs',
-        validator: ETHValidator,
-    }, {
-        name: 'NetKoin',
-        symbol: 'ntk',
-        validator: ETHValidator,
-    }, {
-        name: 'OAX',
-        symbol: 'oax',
-        validator: ETHValidator,
-    }, {
-        name: 'Menlo One',
-        symbol: 'one',
-        validator: ETHValidator,
-    }, {
-        name: 'SoMee.Social',
-        symbol: 'ong',
-        validator: ETHValidator,
-    }, {
-        name: 'ORS Group',
-        symbol: 'ors',
-        validator: ETHValidator,
-    }, {
-        name: 'OST',
-        symbol: 'ost',
-        validator: ETHValidator,
-    }, {
-        name: 'Patron',
-        symbol: 'pat',
-        validator: ETHValidator,
-    }, {
-        name: 'Paxos Standard',
-        symbol: 'pax',
-        validator: ETHValidator,
-    }, {
-        name: 'Peculium',
-        symbol: 'pcl',
-        validator: ETHValidator,
-    }, {
-        name: 'Perlin',
-        symbol: 'perl',
-        validator: ETHValidator,
-    }, {
-        name: 'Pillar',
-        symbol: 'plr',
-        validator: ETHValidator,
-    }, {
-        name: 'PumaPay',
-        symbol: 'pma',
-        validator: ETHValidator,
-    }, {
-        name: 'Po.et',
-        symbol: 'poe',
-        validator: ETHValidator,
-    }, {
-        name: 'Power Ledger',
-        symbol: 'powr',
-        validator: ETHValidator,
-    }, {
-        name: 'Populous',
-        symbol: 'ppt',
-        validator: ETHValidator,
-    }, {
-        name: 'Presearch',
-        symbol: 'pre',
-        validator: ETHValidator,
-    }, {
-        name: 'Patientory',
-        symbol: 'ptoy',
-        validator: ETHValidator,
-    }, {
-        name: 'QuarkChain',
-        symbol: 'qkc',
-        validator: ETHValidator,
-    }, {
-        name: 'Quantstamp',
-        symbol: 'qsp',
-        validator: ETHValidator,
-    }, {
-        name: 'Revain',
-        symbol: 'r',
-        validator: ETHValidator,
-    }, {
-        name: 'Raiden Network Token',
-        symbol: 'rdn',
-        validator: ETHValidator,
-    }, {
-        name: 'Ren',
-        symbol: 'ren',
-        validator: ETHValidator,
-    }, {
-        name: 'Request',
-        symbol: 'req',
-        validator: ETHValidator,
-    }, {
-        name: 'Refereum',
-        symbol: 'rfr',
-        validator: ETHValidator,
-    }, {
-        name: 'SiaCashCoin',
-        symbol: 'scc',
-        validator: ETHValidator,
-    }, {
-        name: 'Sentinel',
-        symbol: 'sent',
-        validator: ETHValidator,
-    }, {
-        name: 'SkinCoin',
-        symbol: 'skin',
-        validator: ETHValidator,
-    }, {
-        name: 'SunContract',
-        symbol: 'snc',
-        validator: ETHValidator,
-    }, {
-        name: 'SingularDTV',
-        symbol: 'sngls',
-        validator: ETHValidator,
-    }, {
-        name: 'SONM',
-        symbol: 'snm',
-        validator: ETHValidator,
-    }, {
-        name: 'All Sports',
-        symbol: 'soc',
-        validator: ETHValidator,
-    }, {
-        name: 'SIRIN LABS Token',
-        symbol: 'srn',
-        validator: ETHValidator,
-    }, {
-        name: 'Stox',
-        symbol: 'stx',
-        validator: ETHValidator,
-    }, {
-        name: 'Substratum',
-        symbol: 'sub',
-        validator: ETHValidator,
-    }, {
-        name: 'SwftCoin',
-        symbol: 'swftc',
-        validator: ETHValidator,
-    }, {
-        name: 'Lamden',
-        symbol: 'tau',
-        validator: ETHValidator,
-    }, {
-        name: 'Telcoin',
-        symbol: 'tel',
-        validator: ETHValidator,
-    }, {
-        name: 'Chronobank',
-        symbol: 'time',
-        validator: ETHValidator,
-    }, {
-        name: 'Monolith',
-        symbol: 'tkn',
-        validator: ETHValidator,
-    }, {
-        name: 'Time New Bank',
-        symbol: 'tnb',
-        validator: ETHValidator,
-    }, {
-        name: 'Tierion',
-        symbol: 'tnt',
-        validator: ETHValidator,
-    }, {
-        name: 'Tripio',
-        symbol: 'trio',
-        validator: ETHValidator,
-    }, {
-        name: 'WeTrust',
-        symbol: 'trst',
-        validator: ETHValidator,
-    }, {
-        name: 'USD Coin',
-        symbol: 'usdc',
-        validator: ETHValidator,
-    }, {
-        name: 'USDT ERC-20',
-        symbol: 'usdt20',
-        validator: ETHValidator,
-    }, {
-        name: 'Utrust',
-        symbol: 'utk',
-        validator: ETHValidator,
-    }, {
-        name: 'BLOCKv',
-        symbol: 'vee',
-        validator: ETHValidator,
-    }, {
-        name: 'VIBE',
-        symbol: 'vibe',
-        validator: ETHValidator,
-    }, {
-        name: 'Tael',
-        symbol: 'wabi',
-        validator: ETHValidator,
-    }, {
-        name: 'WePower',
-        symbol: 'wpr',
-        validator: ETHValidator,
-    }, {
-        name: 'Waltonchain',
-        symbol: 'wtc',
-        validator: ETHValidator,
-    }, {
-        name: 'BlitzPredict',
-        symbol: 'xbp',
-        validator: ETHValidator,
-    }, {
-        name: 'CryptoFranc',
-        symbol: 'xchf',
-        validator: ETHValidator,
-    }, {
-        name: 'Exchange Union',
-        symbol: 'xuc',
-        validator: ETHValidator,
-    }, {
-        name: 'YOU COIN',
-        symbol: 'you',
-        validator: ETHValidator,
-    }, {
-        name: 'Zap',
-        symbol: 'zap',
-        validator: ETHValidator,
-    }, {
-        name: 'Nano',
-        symbol: 'nano',
+        // disable iota validation for now
+        // }, {
+        //     name: 'Iota',
+        //     symbol: 'iota',
+        //     validator: IOTAValidator,
+    },
+    {
+        name: "IHT Real Estate Protocol",
+        symbol: "iht",
+        validator: ETHValidator,
+    },
+    {
+        name: "Insolar",
+        symbol: "ins",
+        validator: ETHValidator,
+    },
+    {
+        name: "IoTeX",
+        symbol: "iotx",
+        validator: ETHValidator,
+    },
+    {
+        name: "BitKan",
+        symbol: "kan",
+        validator: ETHValidator,
+    },
+    {
+        name: "Kcash",
+        symbol: "kcash",
+        validator: ETHValidator,
+    },
+    {
+        name: "KEY",
+        symbol: "key",
+        validator: ETHValidator,
+    },
+    {
+        name: "KickToken",
+        symbol: "kick",
+        validator: ETHValidator,
+    },
+    {
+        name: "Kyber Network",
+        symbol: "knc",
+        validator: ETHValidator,
+    },
+    {
+        name: "Lambda",
+        symbol: "lamb",
+        validator: ETHValidator,
+    },
+    {
+        name: "Aave",
+        symbol: "lend",
+        validator: ETHValidator,
+    },
+    {
+        name: "LinkEye",
+        symbol: "let",
+        validator: ETHValidator,
+    },
+    {
+        name: "LIFE",
+        symbol: "life",
+        validator: ETHValidator,
+    },
+    {
+        name: "LockTrip",
+        symbol: "loc",
+        validator: ETHValidator,
+    },
+    {
+        name: "Loopring",
+        symbol: "lrc",
+        validator: ETHValidator,
+    },
+    {
+        name: "Lunyr",
+        symbol: "lun",
+        validator: ETHValidator,
+    },
+    {
+        name: "Decentraland",
+        symbol: "mana",
+        validator: ETHValidator,
+    },
+    {
+        name: "Matic Network",
+        symbol: "matic",
+        validator: ETHValidator,
+    },
+    {
+        name: "Avalanche",
+        symbol: "avax",
+        validator: ETHValidator,
+    },
+    {
+        name: "MCO",
+        symbol: "mco",
+        validator: ETHValidator,
+    },
+    {
+        name: "Moeda Loyalty Points",
+        symbol: "mda",
+        validator: ETHValidator,
+    },
+    {
+        name: "Measurable Data Token",
+        symbol: "mdt",
+        validator: ETHValidator,
+    },
+    {
+        name: "Mainframe",
+        symbol: "mft",
+        validator: ETHValidator,
+    },
+    {
+        name: "Mithril",
+        symbol: "mith",
+        validator: ETHValidator,
+    },
+    {
+        name: "Molecular Future",
+        symbol: "mof",
+        validator: ETHValidator,
+    },
+    {
+        name: "Monetha",
+        symbol: "mth",
+        validator: ETHValidator,
+    },
+    {
+        name: "Mysterium",
+        symbol: "myst",
+        validator: ETHValidator,
+    },
+    {
+        name: "Nucleus Vision",
+        symbol: "ncash",
+        validator: ETHValidator,
+    },
+    {
+        name: "Nexo",
+        symbol: "nexo",
+        validator: ETHValidator,
+    },
+    {
+        name: "NAGA",
+        symbol: "ngc",
+        validator: ETHValidator,
+    },
+    {
+        name: "Noah Coin",
+        symbol: "noah",
+        validator: ETHValidator,
+    },
+    {
+        name: "Pundi X",
+        symbol: "npxs",
+        validator: ETHValidator,
+    },
+    {
+        name: "NetKoin",
+        symbol: "ntk",
+        validator: ETHValidator,
+    },
+    {
+        name: "OAX",
+        symbol: "oax",
+        validator: ETHValidator,
+    },
+    {
+        name: "Menlo One",
+        symbol: "one",
+        validator: ETHValidator,
+    },
+    {
+        name: "SoMee.Social",
+        symbol: "ong",
+        validator: ETHValidator,
+    },
+    {
+        name: "ORS Group",
+        symbol: "ors",
+        validator: ETHValidator,
+    },
+    {
+        name: "OST",
+        symbol: "ost",
+        validator: ETHValidator,
+    },
+    {
+        name: "Patron",
+        symbol: "pat",
+        validator: ETHValidator,
+    },
+    {
+        name: "Paxos Standard",
+        symbol: "pax",
+        validator: ETHValidator,
+    },
+    {
+        name: "Peculium",
+        symbol: "pcl",
+        validator: ETHValidator,
+    },
+    {
+        name: "Perlin",
+        symbol: "perl",
+        validator: ETHValidator,
+    },
+    {
+        name: "Pillar",
+        symbol: "plr",
+        validator: ETHValidator,
+    },
+    {
+        name: "PumaPay",
+        symbol: "pma",
+        validator: ETHValidator,
+    },
+    {
+        name: "Po.et",
+        symbol: "poe",
+        validator: ETHValidator,
+    },
+    {
+        name: "Power Ledger",
+        symbol: "powr",
+        validator: ETHValidator,
+    },
+    {
+        name: "Populous",
+        symbol: "ppt",
+        validator: ETHValidator,
+    },
+    {
+        name: "Presearch",
+        symbol: "pre",
+        validator: ETHValidator,
+    },
+    {
+        name: "Patientory",
+        symbol: "ptoy",
+        validator: ETHValidator,
+    },
+    {
+        name: "QuarkChain",
+        symbol: "qkc",
+        validator: ETHValidator,
+    },
+    {
+        name: "Quantstamp",
+        symbol: "qsp",
+        validator: ETHValidator,
+    },
+    {
+        name: "Revain",
+        symbol: "r",
+        validator: ETHValidator,
+    },
+    {
+        name: "Raiden Network Token",
+        symbol: "rdn",
+        validator: ETHValidator,
+    },
+    {
+        name: "Ren",
+        symbol: "ren",
+        validator: ETHValidator,
+    },
+    {
+        name: "Request",
+        symbol: "req",
+        validator: ETHValidator,
+    },
+    {
+        name: "Refereum",
+        symbol: "rfr",
+        validator: ETHValidator,
+    },
+    {
+        name: "SiaCashCoin",
+        symbol: "scc",
+        validator: ETHValidator,
+    },
+    {
+        name: "Sentinel",
+        symbol: "sent",
+        validator: ETHValidator,
+    },
+    {
+        name: "SkinCoin",
+        symbol: "skin",
+        validator: ETHValidator,
+    },
+    {
+        name: "SunContract",
+        symbol: "snc",
+        validator: ETHValidator,
+    },
+    {
+        name: "SingularDTV",
+        symbol: "sngls",
+        validator: ETHValidator,
+    },
+    {
+        name: "SONM",
+        symbol: "snm",
+        validator: ETHValidator,
+    },
+    {
+        name: "All Sports",
+        symbol: "soc",
+        validator: ETHValidator,
+    },
+    {
+        name: "SIRIN LABS Token",
+        symbol: "srn",
+        validator: ETHValidator,
+    },
+    {
+        name: "Stox",
+        symbol: "stx",
+        validator: ETHValidator,
+    },
+    {
+        name: "Substratum",
+        symbol: "sub",
+        validator: ETHValidator,
+    },
+    {
+        name: "SwftCoin",
+        symbol: "swftc",
+        validator: ETHValidator,
+    },
+    {
+        name: "Lamden",
+        symbol: "tau",
+        validator: ETHValidator,
+    },
+    {
+        name: "Telcoin",
+        symbol: "tel",
+        validator: ETHValidator,
+    },
+    {
+        name: "Chronobank",
+        symbol: "time",
+        validator: ETHValidator,
+    },
+    {
+        name: "Monolith",
+        symbol: "tkn",
+        validator: ETHValidator,
+    },
+    {
+        name: "Time New Bank",
+        symbol: "tnb",
+        validator: ETHValidator,
+    },
+    {
+        name: "Tierion",
+        symbol: "tnt",
+        validator: ETHValidator,
+    },
+    {
+        name: "Tripio",
+        symbol: "trio",
+        validator: ETHValidator,
+    },
+    {
+        name: "WeTrust",
+        symbol: "trst",
+        validator: ETHValidator,
+    },
+    {
+        name: "USD Coin",
+        symbol: "usdc",
+        validator: ETHValidator,
+    },
+    {
+        name: "USDT ERC-20",
+        symbol: "usdt20",
+        validator: ETHValidator,
+    },
+    {
+        name: "Utrust",
+        symbol: "utk",
+        validator: ETHValidator,
+    },
+    {
+        name: "BLOCKv",
+        symbol: "vee",
+        validator: ETHValidator,
+    },
+    {
+        name: "VIBE",
+        symbol: "vibe",
+        validator: ETHValidator,
+    },
+    {
+        name: "Tael",
+        symbol: "wabi",
+        validator: ETHValidator,
+    },
+    {
+        name: "WePower",
+        symbol: "wpr",
+        validator: ETHValidator,
+    },
+    {
+        name: "Waltonchain",
+        symbol: "wtc",
+        validator: ETHValidator,
+    },
+    {
+        name: "BlitzPredict",
+        symbol: "xbp",
+        validator: ETHValidator,
+    },
+    {
+        name: "CryptoFranc",
+        symbol: "xchf",
+        validator: ETHValidator,
+    },
+    {
+        name: "Exchange Union",
+        symbol: "xuc",
+        validator: ETHValidator,
+    },
+    {
+        name: "YOU COIN",
+        symbol: "you",
+        validator: ETHValidator,
+    },
+    {
+        name: "Zap",
+        symbol: "zap",
+        validator: ETHValidator,
+    },
+    {
+        name: "Nano",
+        symbol: "nano",
         validator: NANOValidator,
-    }, {
-        name: 'RaiBlocks',
-        symbol: 'xrb',
+    },
+    {
+        name: "RaiBlocks",
+        symbol: "xrb",
         validator: NANOValidator,
-    }, {
-        name: 'Siacoin',
-        symbol: 'sc',
+    },
+    {
+        name: "Siacoin",
+        symbol: "sc",
         validator: SCValidator,
-    }, {
-        name: 'HyperSpace',
-        symbol: 'xsc',
+    },
+    {
+        name: "HyperSpace",
+        symbol: "xsc",
         validator: SCValidator,
-    }, {
-        name: 'Loki',
-        symbol: 'loki',
-        addressTypes: { prod: ['114', '116'], testnet: [] },
-        iAddressTypes: { prod: ['115'], testnet: [] },
+    },
+    {
+        name: "Loki",
+        symbol: "loki",
+        addressTypes: { prod: ["114", "116"], testnet: [] },
+        iAddressTypes: { prod: ["115"], testnet: [] },
         validator: XMRValidator,
-    }, {
-        name: 'LBRY Credits',
-        symbol: 'lbc',
-        addressTypes: { prod: ['55'], testnet: [] },
+    },
+    {
+        name: "LBRY Credits",
+        symbol: "lbc",
+        addressTypes: { prod: ["55"], testnet: [] },
         validator: BTCValidator,
-    }, {
-        name: 'Tron',
-        symbol: 'trx',
+    },
+    {
+        name: "Tron",
+        symbol: "trx",
         addressTypes: { prod: [0x41], testnet: [0xa0] },
         validator: TRXValidator,
-    }, {
-        name: 'Nem',
-        symbol: 'xem',
+    },
+    {
+        name: "Nem",
+        symbol: "xem",
         validator: NEMValidator,
-    }, {
-        name: 'Lisk',
-        symbol: 'lsk',
+    },
+    {
+        name: "Lisk",
+        symbol: "lsk",
         validator: LSKValidator,
-    }, {
-        name: 'Stellar',
-        symbol: 'xlm',
+    },
+    {
+        name: "Stellar",
+        symbol: "xlm",
         validator: XLMValidator,
-    }, {
-        name: 'Scopuly',
-        symbol: 'sky',
+    },
+    {
+        name: "Scopuly",
+        symbol: "sky",
         validator: XLMValidator,
-    }, {
-        name: 'BTU Protocol',
-        symbol: 'btu',
+    },
+    {
+        name: "BTU Protocol",
+        symbol: "btu",
         validator: ETHValidator,
-    }, {
-        name: 'Crypto.com Coin',
-        symbol: 'cro',
+    },
+    {
+        name: "Crypto.com Coin",
+        symbol: "cro",
         validator: ETHValidator,
-    }, {
-        name: 'Multi-collateral DAI',
-        symbol: 'dai',
+    },
+    {
+        name: "Multi-collateral DAI",
+        symbol: "dai",
         validator: ETHValidator,
-    }, {
-        name: 'Enjin Coin',
-        symbol: 'enj',
+    },
+    {
+        name: "Enjin Coin",
+        symbol: "enj",
         validator: ETHValidator,
-    }, {
-        name: 'HedgeTrade',
-        symbol: 'hedg',
+    },
+    {
+        name: "HedgeTrade",
+        symbol: "hedg",
         validator: ETHValidator,
-    }, {
-        name: 'Cred',
-        symbol: 'lba',
+    },
+    {
+        name: "Cred",
+        symbol: "lba",
         validator: ETHValidator,
-    }, {
-        name: 'Chainlink',
-        symbol: 'link',
+    },
+    {
+        name: "Chainlink",
+        symbol: "link",
         validator: ETHValidator,
-    }, {
-        name: 'Loom Network',
-        symbol: 'loom',
+    },
+    {
+        name: "Loom Network",
+        symbol: "loom",
         validator: ETHValidator,
-    }, {
-        name: 'Maker',
-        symbol: 'mkr',
+    },
+    {
+        name: "Maker",
+        symbol: "mkr",
         validator: ETHValidator,
-    }, {
-        name: 'Metal',
-        symbol: 'mtl',
+    },
+    {
+        name: "Metal",
+        symbol: "mtl",
         validator: ETHValidator,
-    }, {
-        name: 'Ocean Protocol',
-        symbol: 'ocean',
+    },
+    {
+        name: "Ocean Protocol",
+        symbol: "ocean",
         validator: ETHValidator,
-    //}, {
-    //    name: 'PitisCoin',
-    //    symbol: 'pts', # FIXME: symbol collides with ProtoShares
-    //    validator: BTCValidator,
-    }, {
-        name: 'Quant',
-        symbol: 'qnt',
+        //}, {
+        //    name: 'PitisCoin',
+        //    symbol: 'pts', # FIXME: symbol collides with ProtoShares
+        //    validator: BTCValidator,
+    },
+    {
+        name: "Quant",
+        symbol: "qnt",
         validator: ETHValidator,
-    }, {
-        name: 'Synthetix Network',
-        symbol: 'snx',
+    },
+    {
+        name: "Synthetix Network",
+        symbol: "snx",
         validator: ETHValidator,
-    }, {
-        name: 'SOLVE',
-        symbol: 'solve',
+    },
+    {
+        name: "SOLVE",
+        symbol: "solve",
         validator: ETHValidator,
-    }, {
-        name: 'Spendcoin',
-        symbol: 'spnd',
+    },
+    {
+        name: "Spendcoin",
+        symbol: "spnd",
         validator: ETHValidator,
-    }, {
-        name: 'TEMCO',
-        symbol: 'temco',
+    },
+    {
+        name: "TEMCO",
+        symbol: "temco",
         validator: ETHValidator,
-    }, {
-        name: 'Luniverse',
-        symbol: 'luniverse',
+    },
+    {
+        name: "Luniverse",
+        symbol: "luniverse",
         validator: ETHValidator,
-    }, {
-        name: 'Binance',
-        symbol: 'bnb',
+    },
+    {
+        name: "Binance",
+        symbol: "bnb",
         validator: BinanceValidator,
-    }, {
-      name: 'EOS',
-      symbol: 'eos',
-      validator: EOSValidator,
-    }, {
-        name: 'Tezos',
-        symbol: 'xtz',
+    },
+    {
+        name: "EOS",
+        symbol: "eos",
+        validator: EOSValidator,
+    },
+    {
+        name: "Tezos",
+        symbol: "xtz",
         validator: XTZValidator,
-    }, {
-        name: 'Hedera Hashgraph',
-        symbol: 'hbar',
+    },
+    {
+        name: "Hedera Hashgraph",
+        symbol: "hbar",
         validator: HBARValidator,
-    }, {
-        name: 'Verge',
-        symbol: 'xvg',
-        addressTypes: { prod: ['1e'], testnet: ['6F'] },
+    },
+    {
+        name: "Verge",
+        symbol: "xvg",
+        addressTypes: { prod: ["1e"], testnet: ["6F"] },
         validator: BTCValidator,
-    }, {
-        name: 'Zilliqa',
-        symbol: 'zil',
-        validator: ZILValidator
-	}, {
-        name: 'Binance Smart Chain',
-        symbol: 'bsc',
+    },
+    {
+        name: "Zilliqa",
+        symbol: "zil",
+        validator: ZILValidator,
+    },
+    {
+        name: "Binance Smart Chain",
+        symbol: "bsc",
         validator: ETHValidator,
-    }
+    },
+    {
+        name: "Solana",
+        symbol: "sol",
+        validator: SOLValidator,
+    },
 ];
-
 
 module.exports = {
     getByNameOrSymbol: function (currencyNameOrSymbol) {
         var nameOrSymbol = currencyNameOrSymbol.toLowerCase();
         return CURRENCIES.find(function (currency) {
-            return currency.name.toLowerCase() === nameOrSymbol || currency.symbol.toLowerCase() === nameOrSymbol
+            return (
+                currency.name.toLowerCase() === nameOrSymbol ||
+                currency.symbol.toLowerCase() === nameOrSymbol
+            );
         });
     },
     getAll: function () {
         return CURRENCIES;
-    }
+    },
 };
 
 // spit out details for readme.md
@@ -15050,9 +15792,7 @@ module.exports = {
 //     .sort((a, b) => a.name.toUpperCase() > b.name.toUpperCase() ? 1 : -1)
 //     .forEach(c => console.log(`"${c.name}","${c.symbol}",`));
 
-
-
-},{"./ada_validator":129,"./ae_validator":130,"./ardr_validator":131,"./atom_validator":132,"./bch_validator":133,"./binance_validator":134,"./bitcoin_validator":135,"./eos_validator":147,"./ethereum_validator":148,"./hbar_validator":149,"./icx_validator":150,"./iost_validator":151,"./lisk_validator":152,"./monero_validator":153,"./nano_validator":154,"./nem_validator":155,"./nxt_validator":156,"./ripple_validator":157,"./siacoin_validator":158,"./steem_validator":159,"./stellar_validator":160,"./sys_validator":161,"./tezos_validator":162,"./tron_validator":163,"./zil_validator":165}],147:[function(require,module,exports){
+},{"./ada_validator":129,"./ae_validator":130,"./ardr_validator":131,"./atom_validator":132,"./bch_validator":133,"./binance_validator":134,"./bitcoin_validator":135,"./eos_validator":147,"./ethereum_validator":148,"./hbar_validator":149,"./icx_validator":150,"./iost_validator":151,"./lisk_validator":152,"./monero_validator":153,"./nano_validator":154,"./nem_validator":155,"./neo_validator":156,"./nxt_validator":157,"./ripple_validator":158,"./siacoin_validator":159,"./sol_validator":160,"./steem_validator":161,"./stellar_validator":162,"./sys_validator":163,"./tezos_validator":164,"./tron_validator":165,"./zil_validator":167}],147:[function(require,module,exports){
 function isValidEOSAddress (address, currency, networkType) {
   var regex = /^[a-z0-9]+$/g // Must be numbers and lowercase letters only
   if (address.search(regex) !== -1 && address.length === 12) {
@@ -15171,7 +15911,7 @@ module.exports = {
     }
 };
 }).call(this,require("buffer").Buffer)
-},{"./crypto/utils":145,"buffer":4}],153:[function(require,module,exports){
+},{"./crypto/utils":145,"buffer":5}],153:[function(require,module,exports){
 var cryptoUtils = require('./crypto/utils')
 var cnBase58 = require('./crypto/cnBase58')
 
@@ -15264,7 +16004,7 @@ module.exports = {
     }
 };
 
-},{"./crypto/utils":145,"base-x":1}],155:[function(require,module,exports){
+},{"./crypto/utils":145,"base-x":2}],155:[function(require,module,exports){
 (function (Buffer){
 var cryptoUtils = require('./crypto/utils');
 
@@ -15290,7 +16030,42 @@ module.exports = {
     isValidAddress: isValidAddress,
 }
 }).call(this,require("buffer").Buffer)
-},{"./crypto/utils":145,"buffer":4}],156:[function(require,module,exports){
+},{"./crypto/utils":145,"buffer":5}],156:[function(require,module,exports){
+const cryptoUtils = require("./crypto/utils");
+const bitcoinValidator = require("./bitcoin_validator");
+
+const NEO_PROTOCOL_VERSION = 53;
+
+module.exports = {
+    isValidAddress: function (address, currency, networkType) {
+        try {
+            const decoded = cryptoUtils.base58(address);
+
+            /**
+             * If prefix doesn't match the current protocol version
+             * we can try to validate the address as a legacy address
+             */
+            if (decoded[0] !== NEO_PROTOCOL_VERSION) {
+                return bitcoinValidator.isValidAddress(
+                    address,
+                    currency,
+                    networkType
+                );
+            }
+
+            return true;
+        } catch (err) {
+            // Something went wrong while decoding the address so try the legacy validation
+            return bitcoinValidator.isValidAddress(
+                address,
+                currency,
+                networkType
+            );
+        }
+    },
+};
+
+},{"./bitcoin_validator":135,"./crypto/utils":145}],157:[function(require,module,exports){
 const nxtRegex = new RegExp('^NXT(-[A-Z0-9]{4}){3}-[A-Z0-9]{5}$')
 
 module.exports = {
@@ -15302,7 +16077,7 @@ module.exports = {
   }
 }
 
-},{}],157:[function(require,module,exports){
+},{}],158:[function(require,module,exports){
 var cryptoUtils = require('./crypto/utils');
 var baseX = require('base-x');
 
@@ -15332,7 +16107,7 @@ module.exports = {
     }
 };
 
-},{"./crypto/utils":145,"base-x":1}],158:[function(require,module,exports){
+},{"./crypto/utils":145,"base-x":2}],159:[function(require,module,exports){
 var cryptoUtils = require('./crypto/utils')
 var isEqual = require('lodash/isEqual')
 
@@ -15362,7 +16137,35 @@ module.exports = {
   }
 }
 
-},{"./crypto/utils":145,"lodash/isEqual":117}],159:[function(require,module,exports){
+},{"./crypto/utils":145,"lodash/isEqual":118}],160:[function(require,module,exports){
+var base58 = require('./crypto/base58');
+
+function getDecoded(address) {
+    try {
+        return base58.decode(address);
+    } catch (e) {
+        // if decoding fails, assume invalid address
+        return null;
+    }
+}
+
+function isValidSolAddress(address) {
+    const decoded = getDecoded(address);
+
+    if (decoded) {
+        return decoded.length === 32;
+    }
+    return false;
+}
+
+module.exports = {
+    isValidAddress: function (address, currency, networkType) {
+        return isValidSolAddress(address)
+    }
+}
+
+
+},{"./crypto/base58":137}],161:[function(require,module,exports){
 const accountRegex = new RegExp('^[a-z0-9-.]{3,}$')
 const segmentRegex = new RegExp('^[a-z][a-z0-9-]+[a-z0-9]$')
 const doubleDashRegex = new RegExp('--')
@@ -15394,7 +16197,7 @@ module.exports = {
 }
 
 
-},{}],160:[function(require,module,exports){
+},{}],162:[function(require,module,exports){
 const baseX = require('base-x');
 const crc = require('crc');
 const cryptoUtils = require('./crypto/utils');
@@ -15434,7 +16237,7 @@ module.exports = {
     }
 };
 
-},{"./crypto/utils":145,"base-x":1,"crc":30}],161:[function(require,module,exports){
+},{"./crypto/utils":145,"base-x":2,"crc":31}],163:[function(require,module,exports){
 const path = require('path')
 const BTCValidator = require('./bitcoin_validator');
 var regexp = new RegExp('^sys1[qpzry9x8gf2tvdw0s3jn54khce6mua7l]{39}$')
@@ -15446,7 +16249,7 @@ module.exports = {
 }
 
 
-},{"./bitcoin_validator":135,"path":126}],162:[function(require,module,exports){
+},{"./bitcoin_validator":135,"path":127}],164:[function(require,module,exports){
 const base58 = require('./crypto/base58');
 const cryptoUtils = require('./crypto/utils');
 
@@ -15484,7 +16287,7 @@ module.exports = {
     isValidAddress
 };
 
-},{"./crypto/base58":137,"./crypto/utils":145}],163:[function(require,module,exports){
+},{"./crypto/base58":137,"./crypto/utils":145}],165:[function(require,module,exports){
 var cryptoUtils = require('./crypto/utils');
 
 function decodeBase58Address(base58Sting) {
@@ -15546,7 +16349,7 @@ module.exports = {
         return getEnv(currency, networkType) === address[0];
     }
 };
-},{"./crypto/utils":145}],164:[function(require,module,exports){
+},{"./crypto/utils":145}],166:[function(require,module,exports){
 var currencies = require('./currencies');
 
 var DEFAULT_CURRENCY_NAME = 'bitcoin';
@@ -15569,7 +16372,7 @@ module.exports = {
     }
 };
 
-},{"./currencies":146}],165:[function(require,module,exports){
+},{"./currencies":146}],167:[function(require,module,exports){
 var utils = require('./crypto/utils')
 
 const ALLOWED_CHARS = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l'
@@ -15597,5 +16400,5 @@ module.exports = {
 }
 
 
-},{"./crypto/utils":145}]},{},[164])(164)
+},{"./crypto/utils":145}]},{},[166])(166)
 });

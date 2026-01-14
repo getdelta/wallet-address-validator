@@ -15977,7 +15977,7 @@ module.exports = {
 
 },{"./crypto/cnBase58":142,"./crypto/utils":145}],154:[function(require,module,exports){
 var cryptoUtils = require('./crypto/utils');
-var baseX = require('base-x');
+var baseX = require('base-x').default;
 
 var ALLOWED_CHARS = '13456789abcdefghijkmnopqrstuwxyz';
 
@@ -16079,7 +16079,7 @@ module.exports = {
 
 },{}],158:[function(require,module,exports){
 var cryptoUtils = require('./crypto/utils');
-var baseX = require('base-x');
+var baseX = require('base-x').default;
 
 var ALLOWED_CHARS = 'rpshnaf39wBUDNEGHJKLM4PQRST7VWXYZ2bcdeCg65jkm8oFqi1tuvAxyz';
 
@@ -16198,7 +16198,7 @@ module.exports = {
 
 
 },{}],162:[function(require,module,exports){
-const baseX = require('base-x');
+const baseX = require('base-x').default;
 const crc = require('crc');
 const cryptoUtils = require('./crypto/utils');
 

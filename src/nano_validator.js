@@ -1,5 +1,5 @@
 var cryptoUtils = require('./crypto/utils');
-var baseX = require('base-x');
+var baseX = require('base-x').default;
 
 var ALLOWED_CHARS = '13456789abcdefghijkmnopqrstuwxyz';
 

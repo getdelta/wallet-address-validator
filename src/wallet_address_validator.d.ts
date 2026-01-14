@@ -1,4 +1,4 @@
-declare module 'trezor-address-validator' {
+declare module 'wallet-address-validator' {
     export interface Currency {
         name: string,
         symbol: string,

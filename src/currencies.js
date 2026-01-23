@@ -279,8 +279,8 @@ var CURRENCIES = [
         validator: BTCValidator,
     },
     {
-        name: "Neo",
-        symbol: "neo",
+        name: "N3",
+        symbol: "N3",
         addressTypes: { prod: ["17"], testnet: [] },
         validator: NEOValidator,
     },
